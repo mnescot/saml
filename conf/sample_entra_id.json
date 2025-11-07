@@ -1,0 +1,52 @@
+{
+    "strict": true,
+    "debug": true,
+    "sp": {
+        "entityId": "https://your-caldera-server.example.com",
+        "assertionConsumerService": {
+            "url": "https://your-caldera-server.example.com/saml/acs",
+            "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
+        }
+    },
+    "idp": {
+        "entityId": "https://sts.windows.net/YOUR-TENANT-ID/",
+        "singleSignOnService": {
+            "url": "https://login.microsoftonline.com/YOUR-TENANT-ID/saml2",
+            "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+        },
+        "x509cert": "MIIC8DCCAdigAwIBAgIQXXXXXXXXXXXXXXXXXXXXXXMATGA1UdEwEB/wQFMAMBAf8wHwYDVR0jBBgwFoAU..."
+    },
+    "security": {
+        "nameIdEncrypted": false,
+        "authnRequestsSigned": false,
+        "logoutRequestSigned": false,
+        "logoutResponseSigned": false,
+        "signMetadata": false,
+        "wantMessagesSigned": false,
+        "wantAssertionsSigned": true,
+        "wantNameId": true,
+        "wantNameIdEncrypted": false,
+        "wantAssertionsEncrypted": false,
+        "wantAttributeStatement": true,
+        "requestedAuthnContext": false,
+        "allowRepeatAttributeName": true,
+        "rejectUnsolicitedResponsesWithInResponseTo": true
+    },
+    "user_provisioning": {
+        "enabled": true,
+        "create_missing_users": true,
+        "update_on_login": true,
+        "default_role": "blue",
+        "email_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+        "name_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+        "role_attribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/role",
+        "group_attribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
+        "admin_roles": ["admin", "administrator", "Global Administrator"],
+        "admin_groups": [],
+        "role_mappings": {
+            "admin": ["admin", "administrator", "Global Administrator"],
+            "blue": ["blue_team", "defender", "analyst", "Security Reader"],
+            "red": ["red_team", "attacker", "pentester", "Security Operator"]
+        }
+    }
+}

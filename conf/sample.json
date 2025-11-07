@@ -4,7 +4,7 @@
     "sp": {
         "entityId": "http://localhost:8888",
         "assertionConsumerService": {
-            "url": "http://localhost:8888/saml",
+            "url": "http://localhost:8888/saml/acs",
             "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
         }
     },
@@ -19,6 +19,19 @@
     "security": {
         "wantMessagesSigned": true,
         "wantAssertionsSigned": true,
-        "wantAttributeStatement": true
+        "wantAttributeStatement": true,
+        "requestedAuthnContext": false
+    },
+    "user_provisioning": {
+        "enabled": true,
+        "create_missing_users": true,
+        "update_on_login": true,
+        "default_role": "blue",
+        "email_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+        "name_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+        "role_attribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/role",
+        "group_attribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
+        "admin_roles": ["admin", "administrator"],
+        "admin_groups": []
     }
 }
