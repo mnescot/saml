@@ -18,30 +18,34 @@ class SamlService(BaseService):
         self.config_dir_path = os.path.join(Path(__file__).parents[1], 'conf')
         self.settings_path = os.path.join(self.config_dir_path, 'settings.json')
         self.user_mapping_path = os.path.join(self.config_dir_path, 'user_mapping.json')
-        
+
+        # Register service first to get logger
+        self.log = self.add_service('saml_svc', self)
+
         # Load SAML configuration with better error handling
         try:
             with open(self.settings_path, 'rb') as settings_file:
                 self._saml_config = json.load(settings_file)
+                self.log.info(f'SAML configuration loaded successfully from {self.settings_path}')
         except FileNotFoundError:
             self.log.error(f'SAML configuration file not found: {self.settings_path}')
-            self._saml_config = {}
+            self.log.error(f'Please create {self.settings_path} with valid SAML settings. See conf/sample.json or conf/sample_entra_id.json for examples.')
+            self._saml_config = None
         except json.JSONDecodeError as e:
             self.log.error(f'Invalid JSON in SAML configuration: {e}')
-            self._saml_config = {}
-            
+            self._saml_config = None
+
         # Load user mapping configuration
         try:
             with open(self.user_mapping_path, 'r') as mapping_file:
                 self._user_mapping_config = json.load(mapping_file)
+                self.log.info('User mapping configuration loaded successfully')
         except FileNotFoundError:
-            self.log.info(f'User mapping file not found: {self.user_mapping_path}, using defaults')
+            self.log.debug(f'User mapping file not found: {self.user_mapping_path}, using defaults')
             self._user_mapping_config = self._get_default_user_mapping()
         except json.JSONDecodeError as e:
             self.log.error(f'Invalid JSON in user mapping configuration: {e}')
             self._user_mapping_config = self._get_default_user_mapping()
-            
-        self.log = self.add_service('saml_svc', self)
 
     def _get_default_user_mapping(self) -> Dict[str, Any]:
         """Default user mapping configuration"""
@@ -67,8 +71,10 @@ class SamlService(BaseService):
 
     async def get_saml_auth(self, request):
         """Create OneLogin SAML Auth object from request"""
-        if not self._saml_config:
-            raise Exception('SAML configuration not loaded')
+        if self._saml_config is None or not self._saml_config:
+            error_msg = f'SAML configuration not loaded. Please ensure {self.settings_path} exists and contains valid SAML settings.'
+            self.log.error(error_msg)
+            raise Exception(error_msg)
 
         saml_response = await self._prepare_auth_parameter(request)
         return OneLogin_Saml2_Auth(saml_response, self._saml_config)
@@ -137,8 +143,8 @@ class SamlService(BaseService):
         attributes = saml_auth.get_attributes()
         name_id = saml_auth.get_nameid()
 
-        # Get configuration for attribute names
-        user_provisioning = self._saml_config.get('user_provisioning', {})
+        # Get configuration for attribute names with safe defaults
+        user_provisioning = (self._saml_config or {}).get('user_provisioning', {})
         email_attr = user_provisioning.get('email_attribute', 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress')
         name_attr = user_provisioning.get('name_attribute', 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name')
         role_attr = user_provisioning.get('role_attribute', 'http://schemas.microsoft.com/ws/2008/06/identity/claims/role')
@@ -179,8 +185,8 @@ class SamlService(BaseService):
 
     def _determine_caldera_role(self, user_info: Dict[str, Any]) -> str:
         """Determine Caldera role based on SAML attributes and mapping configuration"""
-        user_provisioning = self._saml_config.get('user_provisioning', {})
-        default_role = user_provisioning.get('default_role', 'user')
+        user_provisioning = (self._saml_config or {}).get('user_provisioning', {})
+        default_role = user_provisioning.get('default_role', 'blue')
         admin_roles = user_provisioning.get('admin_roles', ['admin', 'administrator'])
         admin_groups = user_provisioning.get('admin_groups', [])
         
@@ -218,6 +224,8 @@ class SamlService(BaseService):
 
     def _is_user_provisioning_enabled(self) -> bool:
         """Check if user provisioning is enabled"""
+        if not self._saml_config:
+            return False
         user_provisioning = self._saml_config.get('user_provisioning', {})
         return user_provisioning.get('enabled', False)
 
@@ -238,7 +246,7 @@ class SamlService(BaseService):
             # Check if user exists
             user_exists = caldera_role in auth_svc.user_map
 
-            user_provisioning = self._saml_config.get('user_provisioning', {})
+            user_provisioning = (self._saml_config or {}).get('user_provisioning', {})
             create_missing = user_provisioning.get('create_missing_users', True)
             update_on_login = user_provisioning.get('update_on_login', True)
 

@@ -3,8 +3,44 @@
 ## Overview
 `saml` is a Caldera plugin that provides SAML authentication for Caldera by establishing Caldera as
 a SAML Service Provider (SP). To use this plugin, users will need to have Caldera configured as an application
-in their Identity Provider (IdP), and a `conf/settings.json` file will need to be created in the plugin 
+in their Identity Provider (IdP), and a `conf/settings.json` file **MUST** be created in the plugin
 with the appropriate SAML settings and IdP and SP information.
+
+## Quick Start
+
+### Prerequisites
+1. Caldera server installed and running
+2. Access to an Identity Provider (e.g., Microsoft Entra ID, Okta, OneLogin)
+3. Ability to configure SAML applications in your IdP
+
+### Critical Setup Steps
+
+**⚠️ IMPORTANT**: The plugin will NOT work without completing these steps:
+
+1. **Create settings.json file**:
+   ```bash
+   cd plugins/saml
+   cp conf/sample_entra_id.json conf/settings.json
+   # OR for other IdPs:
+   # cp conf/sample.json conf/settings.json
+   ```
+
+2. **Edit settings.json** with your IdP details (entity ID, SSO URL, certificate)
+
+3. **Configure Caldera to use SAML login handler** in your main Caldera config file:
+   ```yaml
+   auth.login.handler.module: plugins.saml.app.saml_login_handler
+   ```
+
+4. **Enable the plugin** in Caldera's plugin configuration:
+   ```yaml
+   plugins:
+     - saml
+   ```
+
+5. **Restart Caldera**
+
+If you skip any of these steps, SAML authentication will fail. Check Caldera logs for error messages.
 
 When enabled and configured, this plugin will provide the following:
 - When browsing to the main Caldera site (e.g. `http://localhost:8888/`) or to the `/enter` URL for the Caldera site
