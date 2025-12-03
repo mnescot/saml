@@ -155,9 +155,12 @@ class SamlService(BaseService):
             if self._is_user_provisioning_enabled():
                 await self._provision_user(user_info, caldera_role)
 
-            # Authenticate user
+            # Authenticate user (will raise HTTPFound redirect on success)
             await self._authenticate_user(request, caldera_role, user_info)
 
+        except web.HTTPRedirection:
+            # Re-raise redirects (this is expected for successful login)
+            raise
         except Exception as e:
             self.log.error(f'Enhanced authentication failed: {e}')
             raise web.HTTPFound('/login')
