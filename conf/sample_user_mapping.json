@@ -1,0 +1,17 @@
+{
+  "role_mappings": {
+    "admin": ["Admin", "Administrator", "Global Administrator", "Security Administrator"],
+    "red": ["Red Team", "Penetration Tester", "Offensive Security"],
+    "blue": ["Blue Team", "SOC Analyst", "Defender", "Security Analyst"],
+    "user": ["User", "Viewer", "Read Only"]
+  },
+  "group_mappings": {
+    "Caldera-Admins": "admin",
+    "Caldera-Red-Team": "red",
+    "Caldera-Blue-Team": "blue"
+  },
+  "email_domain_mappings": {
+    "admin.example.com": "admin",
+    "contractor.example.com": "user"
+  }
+}
