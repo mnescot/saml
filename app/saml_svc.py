@@ -273,28 +273,22 @@ class SamlService(BaseService):
                 # Define privileges based on role
                 privileges = self._get_role_privileges(caldera_role)
 
-                # Add user to auth service
-                auth_svc.user_map[caldera_role] = {
-                    'password': self._generate_temp_password(),
-                    'privileges': privileges,
-                    'created_via_saml': True,
-                    'saml_email': email,
-                    'saml_display_name': display_name,
-                    'last_saml_login': self._get_current_timestamp()
-                }
+                # Add user to auth service as tuple (password, privileges)
+                # Note: Caldera expects user_map entries as (password, privileges) tuples
+                auth_svc.user_map[caldera_role] = (
+                    self._generate_temp_password(),
+                    privileges
+                )
 
                 self.log.info(f'User {caldera_role} created successfully')
 
             elif user_exists and update_on_login:
-                # Update existing user
-                self.log.debug(f'Updating existing user: {caldera_role}')
-
-                user_data = auth_svc.user_map[caldera_role]
-                user_data.update({
-                    'saml_email': email,
-                    'saml_display_name': display_name,
-                    'last_saml_login': self._get_current_timestamp()
-                })
+                # User already exists - tuples are immutable, so we recreate the entry
+                # to maintain the same password but acknowledge the login
+                self.log.debug(f'User {caldera_role} logged in via SAML as {email}')
+                # Note: Updating existing tuple users is not necessary as the password
+                # and privileges remain unchanged. Additional SAML metadata cannot be
+                # stored in the tuple format.
 
         except Exception as e:
             self.log.error(f'User provisioning failed: {e}')
