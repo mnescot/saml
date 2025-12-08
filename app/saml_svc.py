@@ -246,7 +246,7 @@ class SamlService(BaseService):
         return user_provisioning.get('enabled', False)
 
     async def _provision_user(self, user_info: Dict[str, Any], caldera_role: str):
-        """Provision or update user in Caldera"""
+        """Provision or update user in Caldera using proper User namedtuple structure"""
         try:
             auth_svc = self.get_service('auth_svc')
             if not auth_svc:
@@ -259,36 +259,39 @@ class SamlService(BaseService):
                 self.log.warning('No email found in SAML response, cannot provision user')
                 return
 
-            # Check if user exists
-            user_exists = caldera_role in auth_svc.user_map
+            # Use email as username (key in user_map)
+            username = email
+
+            # Check if user exists by username (email), not role
+            user_exists = username in auth_svc.user_map
 
             user_provisioning = self._saml_config.get('user_provisioning', {})
             create_missing = user_provisioning.get('create_missing_users', True)
             update_on_login = user_provisioning.get('update_on_login', True)
 
             if not user_exists and create_missing:
-                # Create new user
-                self.log.info(f'Creating new user: {caldera_role} for {email}')
+                # Create new user using Caldera's create_user method
+                # This creates: User(username=email, password=pwd, permissions=(caldera_role, 'app'))
+                self.log.info(f'Creating new user: {username} with role {caldera_role}')
 
-                # Define privileges based on role
-                privileges = self._get_role_privileges(caldera_role)
+                password = self._generate_temp_password()
 
-                # Add user to auth service as tuple (password, privileges)
-                # Note: Caldera expects user_map entries as (password, privileges) tuples
-                auth_svc.user_map[caldera_role] = (
-                    self._generate_temp_password(),
-                    privileges
-                )
+                # Use auth_svc.create_user() to ensure proper User namedtuple structure
+                # This automatically creates: user_map[username] = User(username, password, (group, 'app'))
+                await auth_svc.create_user(username, password, caldera_role)
 
-                self.log.info(f'User {caldera_role} created successfully')
+                self.log.info(f'User {username} created successfully with role {caldera_role}')
 
             elif user_exists and update_on_login:
-                # User already exists - tuples are immutable, so we recreate the entry
-                # to maintain the same password but acknowledge the login
-                self.log.debug(f'User {caldera_role} logged in via SAML as {email}')
-                # Note: Updating existing tuple users is not necessary as the password
-                # and privileges remain unchanged. Additional SAML metadata cannot be
-                # stored in the tuple format.
+                # Update existing user's password (User namedtuples are immutable, so recreate)
+                self.log.debug(f'Updating existing user: {username}')
+
+                password = self._generate_temp_password()
+
+                # Recreate user with updated password
+                await auth_svc.create_user(username, password, caldera_role)
+
+                self.log.debug(f'User {username} updated successfully')
 
         except Exception as e:
             self.log.error(f'User provisioning failed: {e}')
@@ -318,7 +321,7 @@ class SamlService(BaseService):
         return datetime.utcnow().isoformat()
 
     async def _authenticate_user(self, request, caldera_role: str, user_info: Dict[str, Any]):
-        """Authenticate user with Caldera"""
+        """Authenticate user with Caldera using email as username"""
         auth_svc = self.get_service('auth_svc')
         if not auth_svc:
             raise Exception('Auth service not available')
@@ -326,12 +329,16 @@ class SamlService(BaseService):
         email = user_info.get('email', 'unknown@unknown.com')
         display_name = user_info.get('display_name', email)
 
-        if caldera_role in auth_svc.user_map:
+        # Use email as username (key in user_map), not role!
+        username = email
+
+        if username in auth_svc.user_map:
+            # Pass username (email), not role, to handle_successful_login
             # Will raise redirect on success
-            self.log.info(f'User "{display_name}" ({email}) authenticated via SAML as "{caldera_role}"')
-            await auth_svc.handle_successful_login(request, caldera_role)
+            self.log.info(f'User "{display_name}" ({username}) authenticated via SAML with role "{caldera_role}"')
+            await auth_svc.handle_successful_login(request, username)
         else:
-            self.log.warning(f'Caldera role "{caldera_role}" not configured for user "{display_name}" ({email})')
+            self.log.warning(f'User "{username}" not found in user_map. Role: "{caldera_role}", Display name: "{display_name}"')
             raise web.HTTPFound('/login')
 
     # Specific handler methods for different SAML endpoints
