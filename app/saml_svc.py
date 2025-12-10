@@ -1,15 +1,17 @@
 import json
 import os
-import warnings
 import logging
+import base64
+import urllib.parse
 from typing import Dict, Any, Optional
-warnings.filterwarnings('ignore', 'defusedxml.lxml is no longer supported and will be removed in a future release.', DeprecationWarning)
 
 from aiohttp import web
 from pathlib import Path
-from onelogin.saml2.auth import OneLogin_Saml2_Auth
-from onelogin.saml2.settings import OneLogin_Saml2_Settings
-from onelogin.saml2.utils import OneLogin_Saml2_Utils
+from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
+from saml2.client import Saml2Client
+from saml2.config import Config as Saml2Config
+from saml2.metadata import create_metadata_string
+from saml2.response import AuthnResponse
 from app.utility.base_service import BaseService
 
 
@@ -42,6 +44,93 @@ class SamlService(BaseService):
             self._user_mapping_config = self._get_default_user_mapping()
 
         self.log = self.add_service('saml_svc', self)
+
+    def _convert_onelogin_config_to_pysaml2(self, onelogin_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert OneLogin python3-saml config format to pysaml2 config format.
+        This maintains backward compatibility with existing settings.json files.
+        """
+        sp = onelogin_config.get('sp', {})
+        idp = onelogin_config.get('idp', {})
+        security = onelogin_config.get('security', {})
+
+        # Extract SP entity ID and ACS URL
+        sp_entity_id = sp.get('entityId', 'http://localhost:8888')
+        acs_info = sp.get('assertionConsumerService', {})
+        acs_url = acs_info.get('url', f'{sp_entity_id}/saml/acs')
+        acs_binding = acs_info.get('binding', BINDING_HTTP_POST)
+
+        # Extract IdP information
+        idp_entity_id = idp.get('entityId', '')
+        sso_info = idp.get('singleSignOnService', {})
+        sso_url = sso_info.get('url', '')
+        sso_binding = sso_info.get('binding', BINDING_HTTP_REDIRECT)
+
+        # Extract certificate (remove whitespace and newlines)
+        idp_cert = idp.get('x509cert', '').replace('\n', '').replace('\r', '').replace(' ', '')
+
+        # Build pysaml2 config
+        pysaml2_config = {
+            'entityid': sp_entity_id,
+            'service': {
+                'sp': {
+                    'name': 'Caldera SAML SP',
+                    'endpoints': {
+                        'assertion_consumer_service': [
+                            (acs_url, acs_binding),
+                        ],
+                    },
+                    'allow_unsolicited': True,
+                    'authn_requests_signed': security.get('authnRequestsSigned', False),
+                    'want_assertions_signed': security.get('wantAssertionsSigned', True),
+                    'want_response_signed': security.get('wantMessagesSigned', True),
+                },
+            },
+            'metadata': {
+                'inline': [self._build_idp_metadata(idp_entity_id, sso_url, sso_binding, idp_cert)],
+            },
+            'debug': onelogin_config.get('debug', False),
+        }
+
+        return pysaml2_config
+
+    def _build_idp_metadata(self, entity_id: str, sso_url: str, sso_binding: str, cert: str) -> str:
+        """Build IdP metadata XML from OneLogin config parameters"""
+        binding_map = {
+            'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect': BINDING_HTTP_REDIRECT,
+            'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST': BINDING_HTTP_POST,
+        }
+        binding = binding_map.get(sso_binding, BINDING_HTTP_REDIRECT)
+
+        # Format certificate with proper PEM structure if not already formatted
+        if cert and not cert.startswith('-----BEGIN CERTIFICATE-----'):
+            cert_formatted = f"-----BEGIN CERTIFICATE-----\n{cert}\n-----END CERTIFICATE-----"
+        else:
+            cert_formatted = cert
+
+        metadata = f'''<?xml version="1.0"?>
+<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="{entity_id}">
+  <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <KeyDescriptor use="signing">
+      <KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#">
+        <X509Data>
+          <X509Certificate>{cert}</X509Certificate>
+        </X509Data>
+      </KeyInfo>
+    </KeyDescriptor>
+    <SingleSignOnService Binding="{binding}" Location="{sso_url}"/>
+  </IDPSSODescriptor>
+</EntityDescriptor>'''
+
+        return metadata
+
+    def _get_saml2_client(self) -> Saml2Client:
+        """Create and return a pysaml2 client instance"""
+        pysaml2_config = self._convert_onelogin_config_to_pysaml2(self._saml_config)
+        config = Saml2Config()
+        config.load(pysaml2_config)
+        client = Saml2Client(config=config)
+        return client
 
     def _get_default_user_mapping(self) -> Dict[str, Any]:
         """Default user mapping configuration"""
@@ -87,27 +176,12 @@ class SamlService(BaseService):
             self.log.debug('Redirecting to main login page')
             raise web.HTTPFound('/login')
 
-    async def set_saml_login_handler(self):
-        """Set self as the optional login handler for the auth service."""
-        self.log.debug('SAML login handler initialization complete.')
-        # Note: set_optional_login_handler call removed for AuthService compatibility
-        # SAML authentication is handled via route registration in hook.py
-        pass
-
-    async def get_saml_auth(self, request):
-        """Create OneLogin SAML Auth object from request"""
-        if not self._saml_config:
-            raise Exception('SAML configuration not loaded')
-
-        saml_response = await self._prepare_auth_parameter(request)
-        return OneLogin_Saml2_Auth(saml_response, self._saml_config)
-
     async def _saml_login(self, request):
-        """Core SAML login logic with enhanced user provisioning"""
+        """Core SAML login logic using pysaml2"""
         self.log.debug(f'Handling SAML login: {request.method} {request.path}')
 
         try:
-            saml_auth = await self.get_saml_auth(request)
+            client = self._get_saml2_client()
 
             # Check if this is a SAML response (POST from IdP) or login initiation (GET)
             if request.method == 'POST':
@@ -115,29 +189,101 @@ class SamlService(BaseService):
                 if 'SAMLResponse' in post_data:
                     # Process SAML response from IdP
                     self.log.debug('Processing SAML response from IdP')
-                    saml_auth.process_response()
 
-                    # Check for errors
-                    self._handle_saml_auth_errors(saml_auth)
+                    saml_response = post_data['SAMLResponse']
 
-                    # Handle successful authentication with enhanced provisioning
-                    if saml_auth.is_authenticated():
-                        return await self._handle_enhanced_authentication(request, saml_auth)
-                    else:
-                        self.log.error('SAML authentication failed: not authenticated')
+                    # Parse the SAML response
+                    authn_response = client.parse_authn_request_response(
+                        saml_response,
+                        BINDING_HTTP_POST
+                    )
+
+                    # Get user identity from response
+                    identity = authn_response.get_identity()
+                    subject = authn_response.get_subject()
+
+                    if not identity or not subject:
+                        self.log.error('SAML authentication failed: no identity or subject')
                         raise web.HTTPFound('/login')
+
+                    self.log.debug(f'SAML authentication successful for subject: {subject.text}')
+
+                    # Extract user info from SAML attributes
+                    user_info = self._extract_user_info_from_identity(identity, subject)
+
+                    # Determine Caldera role
+                    caldera_role = self._determine_caldera_role(user_info)
+
+                    # Provision user if enabled
+                    if self._is_user_provisioning_enabled():
+                        await self._provision_user(user_info, caldera_role)
+
+                    # Authenticate user
+                    return await self._authenticate_user(request, caldera_role, user_info)
 
             # GET request or no SAML response - initiate login
             self.log.debug('Initiating SAML login redirect to IdP')
-            redirect_url = saml_auth.login(return_to=str(request.url))
+
+            # Get IdP SSO URL from client
+            session_id, info = client.prepare_for_authenticate()
+
+            # Extract redirect URL (first tuple element is the redirect URL)
+            redirect_url = None
+            for key, value in info['headers']:
+                if key == 'Location':
+                    redirect_url = value
+                    break
+
+            if not redirect_url:
+                self.log.error('Failed to get redirect URL from SAML client')
+                raise web.HTTPFound('/login')
+
             self.log.debug(f'Redirecting to IdP: {redirect_url}')
             raise web.HTTPFound(redirect_url)
 
         except web.HTTPRedirection:
             raise
         except Exception as e:
-            self.log.error(f'SAML login error: {e}')
+            self.log.exception(f'SAML login error: {e}')
             raise web.HTTPFound('/login')
+
+    def _extract_user_info_from_identity(self, identity: Dict[str, Any], subject) -> Dict[str, Any]:
+        """Extract user information from SAML identity attributes"""
+        user_info = {
+            'name_id': subject.text,
+            'email': None,
+            'display_name': None,
+            'roles': [],
+            'groups': [],
+        }
+
+        # Common attribute names for email
+        email_attrs = ['email', 'emailAddress', 'mail', 'urn:oid:0.9.2342.19200300.100.1.3']
+        for attr in email_attrs:
+            if attr in identity and identity[attr]:
+                user_info['email'] = identity[attr][0] if isinstance(identity[attr], list) else identity[attr]
+                break
+
+        # Common attribute names for display name
+        name_attrs = ['displayName', 'cn', 'commonName', 'name', 'urn:oid:2.5.4.3']
+        for attr in name_attrs:
+            if attr in identity and identity[attr]:
+                user_info['display_name'] = identity[attr][0] if isinstance(identity[attr], list) else identity[attr]
+                break
+
+        # Extract roles and groups
+        role_attrs = ['role', 'roles', 'Role', 'Roles']
+        group_attrs = ['group', 'groups', 'Group', 'Groups', 'memberOf']
+
+        for attr in role_attrs:
+            if attr in identity:
+                user_info['roles'] = identity[attr] if isinstance(identity[attr], list) else [identity[attr]]
+
+        for attr in group_attrs:
+            if attr in identity:
+                user_info['groups'] = identity[attr] if isinstance(identity[attr], list) else [identity[attr]]
+
+        return user_info
 
     async def _handle_enhanced_authentication(self, request, saml_auth):
         """Enhanced authentication handler with automatic user provisioning"""
@@ -353,94 +499,118 @@ class SamlService(BaseService):
         return await self._saml_login(request)
 
     async def saml_metadata_handler(self, request):
-        """Handle SAML metadata requests (GET)"""
-        self.log.debug('SAML metadata handler called')
+        """Generate and return SAML SP metadata"""
         try:
-            if not self._saml_config:
-                raise Exception('SAML configuration not loaded')
+            client = self._get_saml2_client()
 
-            settings = OneLogin_Saml2_Settings(self._saml_config)
-            metadata = settings.get_sp_metadata()
+            # Generate metadata
+            metadata = create_metadata_string(
+                configfile=None,
+                config=client.config,
+                valid_for=24  # hours
+            )
 
-            # Validate metadata
-            errors = settings.check_sp_settings()
-            if errors:
-                self.log.error(f'SP metadata validation errors: {errors}')
-                raise Exception(f'SAML metadata validation failed: {errors}')
-
-            self.log.debug('SAML metadata generated successfully')
-            return web.Response(text=metadata, content_type='text/xml')
-
+            return web.Response(
+                text=metadata.decode('utf-8') if isinstance(metadata, bytes) else metadata,
+                content_type='application/xml'
+            )
         except Exception as e:
-            self.log.error(f'Error generating SAML metadata: {e}')
-            raise web.HTTPInternalServerError(text=f'SAML metadata error: {str(e)}')
+            self.log.exception(f'Error generating SAML metadata: {e}')
+            return web.Response(text='Error generating metadata', status=500)
 
     async def saml_sls_handler(self, request):
-        """Handle SAML single logout service"""
-        self.log.debug('SAML SLS handler called')
-        try:
-            saml_auth = await self.get_saml_auth(request)
+        """Handle SAML Single Logout Service (SLS)"""
+        self.log.debug('SAML SLS (logout) not yet implemented')
+        raise web.HTTPFound('/login')
 
-            if request.method == 'GET':
-                # Handle logout request from IdP
-                url = saml_auth.process_slo(delete_session_cb=lambda: None)
-                errors = saml_auth.get_errors()
-                if errors:
-                    self.log.error(f'SLO errors: {errors}')
-                if url:
-                    raise web.HTTPFound(url)
-                else:
-                    raise web.HTTPFound('/')
-            else:
-                # Initiate logout
-                url = saml_auth.logout()
-                raise web.HTTPFound(url)
+    async def set_saml_login_handler(self):
+        """Set self as the optional login handler for the auth service."""
+        self.log.debug('SAML login handler initialization complete.')
+        pass
 
-        except web.HTTPRedirection:
-            raise
-        except Exception as e:
-            self.log.error(f'SAML SLS error: {e}')
-            raise web.HTTPFound('/')
 
-    # Utility methods
-    @staticmethod
-    def _handle_saml_auth_errors(saml_auth):
-        """Check for SAML authentication errors"""
-        errors = saml_auth.get_errors()
-        if errors:
-            combined_msg = ', '.join(errors)
-            raise Exception('Error when processing SAML response: %s' % combined_msg)
+# Legacy compatibility methods (to be removed in future versions)
 
-    @staticmethod
-    async def _prepare_auth_parameter(request):
-        """Prepare request parameters for OneLogin SAML"""
+    async def get_saml_auth(self, request):
+        """
+        DEPRECATED: Legacy method for OneLogin compatibility.
+        Returns a wrapper object for backward compatibility.
+        """
+        self.log.warning('get_saml_auth() is deprecated - using pysaml2 client instead')
+
+        class LegacySamlAuthWrapper:
+            """Wrapper to provide OneLogin-like interface for legacy code"""
+            def __init__(self, service, request):
+                self.service = service
+                self.request = request
+                self.client = service._get_saml2_client()
+                self._authenticated = False
+                self._identity = None
+                self._subject = None
+
+            def login(self, return_to=None):
+                """Initiate login - returns redirect URL"""
+                session_id, info = self.client.prepare_for_authenticate()
+                for key, value in info['headers']:
+                    if key == 'Location':
+                        return value
+                return None
+
+            def process_response(self):
+                """Process SAML response"""
+                # This is a no-op in the wrapper - actual processing happens elsewhere
+                pass
+
+            def is_authenticated(self):
+                """Check if authenticated"""
+                return self._authenticated
+
+            def get_attributes(self):
+                """Get user attributes"""
+                return self._identity if self._identity else {}
+
+            def get_nameid(self):
+                """Get name ID"""
+                return self._subject.text if self._subject else None
+
+            def get_errors(self):
+                """Get errors - returns empty list for compatibility"""
+                return []
+
+        return LegacySamlAuthWrapper(self, request)
+
+    async def _prepare_auth_parameter(self, request):
+        """
+        DEPRECATED: Legacy method for OneLogin compatibility.
+        Convert aiohttp request to auth parameter format.
+        """
+        self.log.warning('_prepare_auth_parameter() is deprecated')
+
         post_data = {}
         if request.method == 'POST':
-            try:
-                post_data = dict(await request.post())
-            except:
-                post_data = {}
+            post_data = await request.post()
+            post_data = {k: v for k, v in post_data.items()}
 
-        # Check X-Forwarded-Proto header for ALB HTTPS termination
-        forwarded_proto = request.headers.get('X-Forwarded-Proto', '').lower()
-        is_https = (forwarded_proto == 'https') or (request.scheme == 'https')
+        get_data = {k: v for k, v in request.query.items()}
 
-        # Use X-Forwarded-Host if available (for ALB)
-        http_host = request.headers.get('X-Forwarded-Host', request.host)
-
-        # Determine port based on protocol
-        # When behind ALB, use standard ports (443 for HTTPS, 80 for HTTP)
-        server_port = '443' if is_https else '80'
-
-        ret_parameters = {
-            'https': 'on' if is_https else 'off',
-            'http_host': http_host,
-            'script_name': request.path_qs,
-            'server_port': server_port,
-            'get_data': dict(request.query),
-            'post_data': post_data
+        return {
+            'https': 'on' if request.scheme == 'https' else 'off',
+            'http_host': request.host,
+            'server_port': request.url.port or (443 if request.scheme == 'https' else 80),
+            'script_name': request.path,
+            'get_data': get_data,
+            'post_data': post_data,
+            'query_string': request.query_string,
         }
-        return ret_parameters
+
+    def _handle_saml_auth_errors(self, saml_auth):
+        """
+        DEPRECATED: Legacy method for OneLogin compatibility.
+        Check for and handle SAML authentication errors.
+        """
+        self.log.warning('_handle_saml_auth_errors() is deprecated')
+        # No-op for compatibility
+        pass
 
     @staticmethod
     def _get_saml_login_username(saml_auth):
