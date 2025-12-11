@@ -21,6 +21,9 @@ class SamlService(BaseService):
         self.settings_path = os.path.join(self.config_dir_path, 'settings.json')
         self.user_mapping_path = os.path.join(self.config_dir_path, 'user_mapping.json')
 
+        # Initialize logger FIRST before any error handling that uses it
+        self.log = self.add_service('saml_svc', self)
+
         # Load SAML configuration with better error handling
         try:
             with open(self.settings_path, 'rb') as settings_file:
@@ -42,8 +45,6 @@ class SamlService(BaseService):
         except json.JSONDecodeError as e:
             self.log.error(f'Invalid JSON in user mapping configuration: {e}')
             self._user_mapping_config = self._get_default_user_mapping()
-
-        self.log = self.add_service('saml_svc', self)
 
     def _convert_onelogin_config_to_pysaml2(self, onelogin_config: Dict[str, Any]) -> Dict[str, Any]:
         """
