@@ -350,19 +350,19 @@ class SamlService(BaseService):
     def _determine_caldera_role(self, user_info: Dict[str, Any]) -> str:
         """Determine Caldera role based on SAML attributes and mapping configuration"""
         user_provisioning = self._saml_config.get('user_provisioning', {})
-        default_role = user_provisioning.get('default_role', 'user')
+        default_role = user_provisioning.get('default_role', 'blue')
         admin_roles = user_provisioning.get('admin_roles', ['admin', 'administrator'])
         admin_groups = user_provisioning.get('admin_groups', [])
 
         # Check if user has admin roles
         for role in user_info.get('roles', []):
             if role.lower() in [r.lower() for r in admin_roles]:
-                return 'admin'
+                return 'red'
 
         # Check if user is in admin groups
         for group in user_info.get('groups', []):
             if group in admin_groups:
-                return 'admin'
+                return 'red'
 
         # Check role mappings
         role_mappings = self._user_mapping_config.get('role_mappings', {})
