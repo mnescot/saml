@@ -348,6 +348,29 @@ class SamlService(BaseService):
         """Get multiple attribute values"""
         return attributes.get(attr_name, [])
 
+    def _normalize_caldera_role(self, role: str) -> str:
+        """
+        Normalize role names to match Caldera's valid role set.
+
+        Caldera only accepts: 'red', 'blue', 'user' (case-sensitive)
+        The Access enum in auth_svc.py only has RED, BLUE, USER members.
+
+        This method transforms common role names to valid Caldera roles:
+        - 'admin', 'administrator' → 'red' (highest privilege)
+        - 'red', 'blue', 'user' → unchanged (already valid)
+
+        This allows SAML configurations to use 'admin' as a role name
+        while ensuring Caldera receives only valid role values.
+        """
+        role_lower = role.lower()
+
+        # Map admin role variants to Caldera's 'red' role
+        if role_lower in ['admin', 'administrator']:
+            return 'red'
+
+        # Return valid Caldera roles as-is
+        return role
+
     def _determine_caldera_role(self, user_info: Dict[str, Any]) -> str:
         """Determine Caldera role based on SAML attributes and mapping configuration"""
         user_provisioning = self._saml_config.get('user_provisioning', {})
@@ -358,34 +381,37 @@ class SamlService(BaseService):
         # Check if user has admin roles
         for role in user_info.get('roles', []):
             if role.lower() in [r.lower() for r in admin_roles]:
-                return 'red'
+                return self._normalize_caldera_role('red')
 
         # Check if user is in admin groups
         for group in user_info.get('groups', []):
             if group in admin_groups:
-                return 'red'
+                return self._normalize_caldera_role('red')
 
         # Check role mappings
         role_mappings = self._user_mapping_config.get('role_mappings', {})
         for caldera_role, saml_roles in role_mappings.items():
             for user_role in user_info.get('roles', []):
                 if user_role.lower() in [r.lower() for r in saml_roles]:
-                    return caldera_role
+                    return self._normalize_caldera_role(caldera_role)
 
         # Check group mappings
         group_mappings = self._user_mapping_config.get('group_mappings', {})
         for group in user_info.get('groups', []):
             if group in group_mappings:
-                return group_mappings[group]
+                mapped_role = group_mappings[group]
+                return self._normalize_caldera_role(mapped_role)
 
         # Check email domain mappings
         email_domain_mappings = self._user_mapping_config.get('email_domain_mappings', {})
         if user_info.get('email'):
             domain = user_info['email'].split('@')[-1] if '@' in user_info['email'] else ''
             if domain in email_domain_mappings:
-                return email_domain_mappings[domain]
+                mapped_role = email_domain_mappings[domain]
+                return self._normalize_caldera_role(mapped_role)
 
-        return default_role
+        # Normalize the default role as well
+        return self._normalize_caldera_role(default_role)
 
     def _is_user_provisioning_enabled(self) -> bool:
         """Check if user provisioning is enabled"""
