@@ -776,9 +776,75 @@ class SamlService(BaseService):
             if self._is_user_provisioning_enabled():
                 await self._provision_user(user_info, role)
 
+            # ...and then make sure the choice actually reached the session,
+            # because provisioning may be disabled, may skip an existing user, or
+            # may have failed silently. Refuse rather than log the user in with
+            # the role their account happened to already have.
+            if not await self._apply_selected_role(user_info, role):
+                self.log.error('Refusing SAML login: selected role %r could not be applied for %r',
+                               str(role), str(user_info.get('email') or ''))
+                return web.Response(
+                    status=403,
+                    content_type='text/html',
+                    text=('<!DOCTYPE html><html><body style="font-family:system-ui;padding:2rem">'
+                          '<h2>Sign-in could not complete</h2><p>The selected role could not be '
+                          'applied to your session, so you have not been signed in. This is '
+                          'deliberate: continuing would have given you a different role from the '
+                          'one you chose.</p><p>Contact your Caldera administrator.</p>'
+                          '</body></html>'))
+
             return await self._authenticate_user(request, role, user_info)
 
         raise web.HTTPMethodNotAllowed(request.method, ['GET', 'POST'])
+
+    async def _apply_selected_role(self, user_info: Dict[str, Any], caldera_role: str) -> bool:
+        """Make the picker's choice true for the SESSION, whatever provisioning says.
+
+        _authenticate_user accepts caldera_role and only LOGS it; it then calls
+        auth_svc.handle_successful_login(request, username), so the session's
+        permissions come from the existing user_map entry. Only _provision_user
+        writes that entry, and it is skipped entirely when
+        user_provisioning.enabled is false, skipped for an existing user when
+        update_on_login is false, and swallows every exception when it does run.
+
+        So on any of those three paths the picker told the user a role had been
+        applied while the session kept the account's previous one -- selecting
+        Blue on a red account produced a RED session (Codex review on
+        mnescot/saml#6). That is a privilege-relevant lie in the UI, not a no-op.
+
+        Returns True only when the entry actually carries the role afterwards.
+        The caller refuses the login on False rather than proceeding with
+        whatever the account already had.
+        """
+        auth_svc = self.get_service('auth_svc')
+        if not auth_svc:
+            self.log.error('Auth service unavailable; cannot apply the selected role')
+            return False
+        username = user_info.get('email')
+        if not username:
+            self.log.error('No email in SAML response; cannot apply the selected role')
+            return False
+
+        existing = auth_svc.user_map.get(username)
+        if existing is not None and caldera_role in tuple(getattr(existing, 'permissions', ()) or ()):
+            return True
+
+        # Reuse the stored password: create_user REPLACES the entry, and minting
+        # a new one on every login would churn a credential for no reason.
+        password = getattr(existing, 'password', None) or self._generate_temp_password()
+        try:
+            await auth_svc.create_user(username, password, caldera_role)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a refusal below
+            self.log.error('Applying selected role %r for %r failed: %s',
+                           caldera_role, username, exc)
+            return False
+
+        updated = auth_svc.user_map.get(username)
+        applied = caldera_role in tuple(getattr(updated, 'permissions', ()) or ())
+        if not applied:
+            self.log.error('user_map for %r does not carry %r after create_user',
+                           username, caldera_role)
+        return applied
 
     @staticmethod
     def _html_escape(text: str) -> str:
@@ -1014,6 +1080,49 @@ class SamlService(BaseService):
             {str(g).lower() for g in up.get('admin_groups', [])},
         )
 
+    #: Most privileged first. _normalize_caldera_role folds 'admin' into 'red',
+    #: so these are the only values an assertion can produce.
+    _ROLE_PRECEDENCE = ('red', 'blue', 'user')
+
+    def _asserted_caldera_roles(self, user_info: Dict[str, Any]) -> set:
+        """EVERY Caldera role the IdP explicitly asserts for this user.
+
+        Collected rather than short-circuited on the first match. Returning the
+        first one made the result depend on the ORDER of keys in
+        user_mapping.json and on the order groups arrive in the assertion, so a
+        user entitled to both blue and red was offered only whichever mapping
+        happened to come first -- and the picker exists precisely for users with
+        more than one entitlement. Two users with identical entitlements could
+        get different pickers (AWS/Codex review on mnescot/saml#6).
+        """
+        matched = set()
+        admin_roles, admin_groups = self._admin_allowlists()
+        roles = [str(r).lower() for r in user_info.get('roles', [])]
+        groups = [str(g).lower() for g in user_info.get('groups', [])]
+
+        if any(r in admin_roles for r in roles) or any(g in admin_groups for g in groups):
+            matched.add(self._normalize_caldera_role('red'))
+
+        role_mappings = self._user_mapping_config.get('role_mappings', {}) or {}
+        for caldera_role, saml_roles in role_mappings.items():
+            if any(r in [str(s).lower() for s in saml_roles] for r in roles):
+                matched.add(self._normalize_caldera_role(caldera_role))
+
+        group_mappings = {str(k).lower(): v for k, v in
+                          (self._user_mapping_config.get('group_mappings', {}) or {}).items()}
+        for g in groups:
+            if g in group_mappings:
+                matched.add(self._normalize_caldera_role(group_mappings[g]))
+
+        email = str(user_info.get('email') or '')
+        if '@' in email:
+            domain = email.rsplit('@', 1)[-1].lower()
+            domain_mappings = {str(k).lower(): v for k, v in
+                               (self._user_mapping_config.get('email_domain_mappings', {}) or {}).items()}
+            if domain in domain_mappings:
+                matched.add(self._normalize_caldera_role(domain_mappings[domain]))
+        return matched
+
     def _matched_caldera_role(self, user_info: Dict[str, Any]):
         """The Caldera role EXPLICITLY asserted by the IdP for this user, or None
         if no role/group/domain rule matched.
@@ -1023,29 +1132,12 @@ class SamlService(BaseService):
         can never silently confer offensive (`red`) entitlement on an identity the
         IdP asserted nothing about. All comparisons are case-insensitive so an
         Entra casing/format difference does not fall through to a broader tier."""
-        admin_roles, admin_groups = self._admin_allowlists()
-        roles = [str(r).lower() for r in user_info.get('roles', [])]
-        groups = [str(g).lower() for g in user_info.get('groups', [])]
-        if any(r in admin_roles for r in roles):
-            return self._normalize_caldera_role('red')
-        if any(g in admin_groups for g in groups):
-            return self._normalize_caldera_role('red')
-        role_mappings = self._user_mapping_config.get('role_mappings', {}) or {}
-        for caldera_role, saml_roles in role_mappings.items():
-            if any(r in [str(s).lower() for s in saml_roles] for r in roles):
-                return self._normalize_caldera_role(caldera_role)
-        group_mappings = {str(k).lower(): v for k, v in
-                          (self._user_mapping_config.get('group_mappings', {}) or {}).items()}
-        for g in groups:
-            if g in group_mappings:
-                return self._normalize_caldera_role(group_mappings[g])
-        email = str(user_info.get('email') or '')
-        if '@' in email:
-            domain = email.rsplit('@', 1)[-1].lower()
-            domain_mappings = {str(k).lower(): v for k, v in
-                               (self._user_mapping_config.get('email_domain_mappings', {}) or {}).items()}
-            if domain in domain_mappings:
-                return self._normalize_caldera_role(domain_mappings[domain])
+        matched = self._asserted_caldera_roles(user_info)
+        # Deterministic and order-independent: the most privileged asserted role
+        # wins, rather than whichever mapping happened to be listed first.
+        for role in self._ROLE_PRECEDENCE:
+            if role in matched:
+                return role
         return None
 
     def _entitled_roles(self, user_info: Dict[str, Any]) -> set:
