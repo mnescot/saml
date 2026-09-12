@@ -25,5 +25,11 @@ async def enable(services):
     # Keep the original saml route for backward compatibility with legacy handler
     app.router.add_route('*', '/saml', saml_svc.saml)
 
+    # Role-selection routes (the user chooses red/blue after SAML
+    # authentication, when their assertion entitles them to more than one).
+    app.router.add_route('GET',  '/saml/role-select', saml_svc.saml_role_select_handler)
+    app.router.add_route('POST', '/saml/role-select', saml_svc.saml_role_select_handler)
+
+
     # Set SAML as the default login handler (enables auto-redirect)
     await saml_svc.set_saml_login_handler()
