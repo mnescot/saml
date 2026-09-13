@@ -815,6 +815,21 @@ class SamlService(BaseService):
         Returns True only when the entry actually carries the role afterwards.
         The caller refuses the login on False rather than proceeding with
         whatever the account already had.
+
+        The write is still bounded by the operator's provisioning settings. An
+        earlier revision wrote unconditionally -- "make the choice true whatever
+        provisioning says" -- which turned the picker into its own account
+        creation path around user_provisioning.enabled (default FALSE),
+        create_missing_users and update_on_login: every identity the IdP accepted
+        could obtain a Caldera account on a deployment whose operator had
+        switched automatic provisioning off (Codex P1 + AWS HIGH on
+        caldera-deployalt#379).
+
+        Refusing is the resolution, not writing anyway. Both properties then
+        hold at once: the picker never lies about the role a session carries,
+        AND it never creates or rewrites an account the operator did not permit.
+        A user whose account already carries the chosen role still signs in with
+        provisioning fully disabled, because that path needs no write at all.
         """
         auth_svc = self.get_service('auth_svc')
         if not auth_svc:
@@ -827,7 +842,30 @@ class SamlService(BaseService):
 
         existing = auth_svc.user_map.get(username)
         if existing is not None and caldera_role in tuple(getattr(existing, 'permissions', ()) or ()):
+            # Already correct, so there is nothing to write and nothing to gate.
             return True
+
+        # Re-derive entitlement against the IdP attributes immediately before the
+        # write. The handler checks this too, but a writer that trusts its caller
+        # is one refactor away from being reachable without the check.
+        try:
+            entitled = self._entitled_roles(user_info)
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            self.log.error('Entitlement re-check failed for %r: %s', username, exc)
+            return False
+        if caldera_role not in entitled:
+            self.log.error('Refusing to apply %r for %r: not entitled (entitled=%s)',
+                           caldera_role, username, sorted(entitled))
+            return False
+
+        if not self._may_write_user(user_exists=existing is not None):
+            self.log.error(
+                'Refusing to apply %r for %r: user provisioning does not permit '
+                'writing this account (enabled=%s, exists=%s). The login is refused '
+                'rather than proceeding with a different role than was chosen.',
+                caldera_role, username, self._is_user_provisioning_enabled(),
+                existing is not None)
+            return False
 
         # Reuse the stored password: create_user REPLACES the entry, and minting
         # a new one on every login would churn a credential for no reason.
@@ -1281,6 +1319,23 @@ class SamlService(BaseService):
         user_provisioning = self._saml_config.get('user_provisioning', {})
         return user_provisioning.get('enabled', False)
 
+    def _may_write_user(self, user_exists: bool) -> bool:
+        """Whether the operator's settings permit writing this entry to user_map.
+
+        The single source of truth for that question. It used to be spelled out
+        inline in _provision_user only, which is how _apply_selected_role came to
+        write accounts the operator had switched off: two writers, one set of
+        rules, and only one of them reading it. Note `enabled` defaults to FALSE,
+        so "no automatic account management" is the OUT-OF-THE-BOX state, not just
+        a hardening step someone opted into.
+        """
+        if not self._is_user_provisioning_enabled():
+            return False
+        user_provisioning = self._saml_config.get('user_provisioning', {})
+        if user_exists:
+            return bool(user_provisioning.get('update_on_login', True))
+        return bool(user_provisioning.get('create_missing_users', True))
+
     async def _provision_user(self, user_info: Dict[str, Any], caldera_role: str):
         """Provision or update user in Caldera using proper User namedtuple structure"""
         try:
@@ -1301,9 +1356,8 @@ class SamlService(BaseService):
             # Check if user exists by username (email), not role
             user_exists = username in auth_svc.user_map
 
-            user_provisioning = self._saml_config.get('user_provisioning', {})
-            create_missing = user_provisioning.get('create_missing_users', True)
-            update_on_login = user_provisioning.get('update_on_login', True)
+            create_missing = self._may_write_user(user_exists=False)
+            update_on_login = self._may_write_user(user_exists=True)
 
             if not user_exists and create_missing:
                 self.log.info(f'Creating new user: {username} with role {caldera_role}')
