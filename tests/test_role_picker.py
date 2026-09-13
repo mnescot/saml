@@ -155,9 +155,14 @@ class AssertedRolesTests(unittest.TestCase):
 class ApplySelectedRoleTests(unittest.TestCase):
     """The picker has already told the user the role was applied."""
 
-    def _svc(self, auth_svc):
+    def _svc(self, auth_svc, provisioning=None, entitled=('blue',)):
         svc = _service(auth_svc=auth_svc)
         svc._generate_temp_password = lambda: 'generated'
+        # Provisioning ENABLED by default here so these tests stay about applying
+        # the role. The gate itself is exercised in ProvisioningGateTests below.
+        svc._saml_config = {'user_provisioning':
+                            {'enabled': True} if provisioning is None else provisioning}
+        svc._entitled_roles = lambda _info: set(entitled)
         return svc
 
     def test_an_existing_red_account_selecting_blue_gets_blue(self):
@@ -207,6 +212,93 @@ class ApplySelectedRoleTests(unittest.TestCase):
     def test_a_missing_email_reports_false(self):
         auth = _AuthSvc()
         self.assertFalse(_run(self._svc(auth)._apply_selected_role({}, 'blue')))
+
+
+class ProvisioningGateTests(unittest.TestCase):
+    """The picker must not become its own account-creation path.
+
+    _apply_selected_role wrote to user_map unconditionally -- the docstring said
+    "whatever provisioning says" -- so every identity the IdP accepted could
+    obtain a Caldera account even where the operator had switched automatic
+    provisioning off. `enabled` defaults to FALSE, so that was the out-of-the-box
+    behaviour, not a misconfiguration (Codex P1 + AWS HIGH on
+    caldera-deployalt#379).
+
+    Refusing the login is the resolution: the picker still never lies about the
+    role a session carries, and it no longer writes accounts nobody permitted.
+    """
+
+    def _svc(self, auth_svc, provisioning, entitled=('blue', 'red')):
+        svc = _service(auth_svc=auth_svc)
+        svc._generate_temp_password = lambda: 'generated'
+        svc._saml_config = {'user_provisioning': provisioning}
+        svc._entitled_roles = lambda _info: set(entitled)
+        return svc
+
+    def test_provisioning_off_does_not_create_a_missing_account(self):
+        """The finding, stated directly."""
+        auth = _AuthSvc()
+        svc = self._svc(auth, {})  # `enabled` absent -> False, the DEFAULT
+        self.assertFalse(_run(svc._apply_selected_role({'email': 'new@x'}, 'blue')))
+        self.assertNotIn('new@x', auth.user_map,
+                         'a disabled provisioner must not gain an account via the picker')
+        self.assertEqual([], auth.created)
+
+    def test_provisioning_off_does_not_rewrite_an_existing_account(self):
+        auth = _AuthSvc({'a@x': _User('a@x', 'pw', ('red', 'app'))})
+        svc = self._svc(auth, {'enabled': False})
+        self.assertFalse(_run(svc._apply_selected_role({'email': 'a@x'}, 'blue')))
+        self.assertIn('red', auth.user_map['a@x'].permissions, 'left untouched')
+
+    def test_provisioning_off_still_admits_an_already_correct_account(self):
+        """The refusal must not lock out users the operator provisioned by hand:
+        this path needs no write, so nothing is being gated."""
+        auth = _AuthSvc({'a@x': _User('a@x', 'pw', ('blue', 'app'))})
+        svc = self._svc(auth, {'enabled': False})
+        self.assertTrue(_run(svc._apply_selected_role({'email': 'a@x'}, 'blue')))
+
+    def test_create_missing_users_false_blocks_only_creation(self):
+        auth = _AuthSvc({'a@x': _User('a@x', 'pw', ('red', 'app'))})
+        svc = self._svc(auth, {'enabled': True, 'create_missing_users': False})
+        self.assertFalse(_run(svc._apply_selected_role({'email': 'new@x'}, 'blue')))
+        self.assertNotIn('new@x', auth.user_map)
+        # ...while an existing account may still be updated (update_on_login
+        # defaults True), which is what makes these two settings distinct.
+        self.assertTrue(_run(svc._apply_selected_role({'email': 'a@x'}, 'blue')))
+
+    def test_update_on_login_false_blocks_only_updates(self):
+        auth = _AuthSvc({'a@x': _User('a@x', 'pw', ('red', 'app'))})
+        svc = self._svc(auth, {'enabled': True, 'update_on_login': False})
+        self.assertFalse(_run(svc._apply_selected_role({'email': 'a@x'}, 'blue')))
+        self.assertIn('red', auth.user_map['a@x'].permissions)
+        self.assertTrue(_run(svc._apply_selected_role({'email': 'new@x'}, 'blue')))
+
+    def test_both_writers_read_the_same_rules(self):
+        """_provision_user spelled these rules out inline and _apply_selected_role
+        did not read them at all. One helper now answers the question for both, so
+        the two cannot drift back apart."""
+        source = (pathlib.Path(__file__).resolve().parents[1] / 'app' / 'saml_svc.py').read_text()
+        body = source[source.index('async def _provision_user'):]
+        body = body[:body.index('\n    def ', 1)]
+        self.assertNotIn("get('create_missing_users'", body,
+                         '_provision_user must ask _may_write_user, not re-read the config')
+        self.assertIn('_may_write_user', body)
+
+    def test_the_role_is_rechecked_against_entitlement_before_writing(self):
+        """Defence in depth: the handler checks entitlement, but a writer that
+        trusts its caller is one refactor away from being reachable without it."""
+        auth = _AuthSvc({'a@x': _User('a@x', 'pw', ('blue', 'app'))})
+        svc = self._svc(auth, {'enabled': True}, entitled=('blue',))
+        self.assertFalse(_run(svc._apply_selected_role({'email': 'a@x'}, 'red')))
+        self.assertNotIn('red', auth.user_map['a@x'].permissions)
+
+    def test_a_failing_entitlement_check_fails_closed(self):
+        auth = _AuthSvc({'a@x': _User('a@x', 'pw', ('blue', 'app'))})
+        svc = self._svc(auth, {'enabled': True})
+        def _boom(_info):
+            raise RuntimeError('attribute source unavailable')
+        svc._entitled_roles = _boom
+        self.assertFalse(_run(svc._apply_selected_role({'email': 'a@x'}, 'red')))
 
 
 class PickerRefusalTests(unittest.TestCase):
