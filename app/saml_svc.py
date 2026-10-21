@@ -686,6 +686,12 @@ class SamlService(BaseService):
                     user_info = self._extract_user_info_from_identity(identity, subject)
 
                     if self._group_role_policy() is not None:
+                        # Older picker tabs cannot reapply a superseded grant.
+                        subject_id = user_info.get('name_id')
+                        if isinstance(subject_id, str) and subject_id:
+                            for pending_token, pending in list(self._pending_auth.items()):
+                                if pending.get('user_info', {}).get('name_id') == subject_id:
+                                    self._pending_auth.pop(pending_token, None)
                         roles = self._group_roles(user_info)
                         if not roles:
                             # This POST already consumed the validated assertion.
