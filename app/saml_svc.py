@@ -141,6 +141,7 @@ class SamlService(BaseService):
     # TTL (seconds) for a pending role-selection auth token
     _PENDING_AUTH_TTL = 300  # 5 minutes
     _GROUP_SESSION_TTL = 3600  # Recheck direct-SAML entitlements at least hourly.
+    _MAX_GROUP_SESSIONS = 64
 
     # How long a consumed assertion is remembered when its own NotOnOrAfter
     # cannot be read. It must exceed any plausible assertion lifetime, because
@@ -982,6 +983,8 @@ class SamlService(BaseService):
                 and isinstance(session.get('saml_assertion_marker'), str)):
             markers.pop(session.get('saml_assertion_marker'), None)
         marker = secrets.token_urlsafe(32)
+        while len(markers) >= self._MAX_GROUP_SESSIONS:
+            markers.pop(next(iter(markers)))
         markers[marker] = MappingProxyType({**identity, 'expires_at': user_info['authn_expires_at']})
         session['saml_assertion_marker'] = marker
         session['saml_assertion_subject'] = username

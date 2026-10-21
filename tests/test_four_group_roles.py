@@ -427,6 +427,31 @@ def test_invalid_authentication_lifetime_cannot_provision_a_role(expires):
     assert auth.user_map == {}
 
 
+def test_active_grants_are_bounded_without_eviction_on_same_browser_refresh():
+    import sys
+    import types
+    from unittest.mock import patch
+    svc, _, info = owned_account()
+    canonical = svc._group_role_identities[info['email']]
+    session = {}
+    sessions = types.ModuleType('aiohttp_session')
+    sessions.get_session = AsyncMock(return_value=session)
+    first = None
+    with patch.dict(sys.modules, {'aiohttp_session': sessions}):
+        for index in range(svc._MAX_GROUP_SESSIONS + 1):
+            session.clear()  # A different browser completes SSO each time.
+            asyncio.run(svc._bind_group_session(SimpleNamespace(), info, canonical))
+            if index == 0:
+                first = next(iter(svc._group_role_session_markers[info['email']].values()))
+        markers = svc._group_role_session_markers[info['email']]
+        assert len(markers) == svc._MAX_GROUP_SESSIONS
+        assert not svc.current_group_identity(first)
+        oldest = next(iter(markers.values()))
+        asyncio.run(svc._bind_group_session(SimpleNamespace(), info, canonical))
+        assert len(markers) == svc._MAX_GROUP_SESSIONS
+        assert svc.current_group_identity(oldest)
+
+
 def guarded_response(svc, username, path='/api/v2/operations'):
     import sys
     import types
