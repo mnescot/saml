@@ -126,3 +126,29 @@ auth.login.handler.module: plugins.saml.app.saml_login_handler
 
 Restart the Caldera server, and any future authentication requests will now be handled via SAML according
 to the previously established settings.
+
+### Four group-based roles
+
+A deployment can enable `group_role_policy` in `conf/settings.json`:
+
+```json
+{"group_role_policy":{"enabled":true,"groups":{
+  "admin":["<Entra Admin group object ID>"],
+  "red":["<Entra Red group object ID>"],
+  "blue":["<Entra Blue group object ID>"],
+  "report":["<Entra Report group object ID>"]}}}
+```
+
+Only group membership in the validated SAML assertion grants these roles.
+Role attributes, email domains and the legacy default role do not grant access
+in this mode. The picker offers exactly the user's memberships; no match shows
+**No access**. Effective permissions always follow **Admin > Red > Blue > Report**,
+regardless of which owned label the user selects. Admin receives core Red/Blue
+permissions; Red and Blue keep their corresponding core permissions; Report
+receives application access only. InfoSec Agent separately enforces the same
+group policy for its UI, API and tools. The deployment must configure both.
+
+Existing account-creation/update opt-outs still apply. If the exact permissions
+cannot be applied, sign-in is refused rather than retaining an older role.
+`group_role_policy` absent/disabled preserves the legacy picker for other
+installations.

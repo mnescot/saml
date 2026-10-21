@@ -714,6 +714,91 @@ class SamlService(BaseService):
             self.log.exception(f'SAML login error: {e}')
             raise web.HTTPFound('/login')
 
+    def _group_role_policy(self):
+        value = self._saml_config.get('group_role_policy')
+        return value if isinstance(value, dict) and value.get('enabled') is True else None
+
+    def _group_roles(self, user_info):
+        """Four explicit group entitlements, highest first; no role/domain fallback."""
+        policy = self._group_role_policy() or {}
+        mapping = policy.get('groups') or {}
+        if not isinstance(mapping, dict):
+            return []
+        groups = user_info.get('groups') or []
+        if not isinstance(groups, list) or not all(isinstance(g, str) for g in groups):
+            return []
+        asserted = {g.strip().casefold() for g in groups if g.strip()}
+        return [role for role in ('admin', 'red', 'blue', 'report')
+                if isinstance(mapping.get(role), list)
+                and any(isinstance(g, str) and g.strip().casefold() in asserted
+                        for g in mapping[role])]
+
+    @staticmethod
+    def _no_access():
+        return web.Response(status=403, content_type='text/html',
+            text='<h1>No access</h1><p>Your SAML group memberships do not grant a Caldera role. '
+                 'Contact your Caldera administrator.</p>')
+
+    async def _group_role_select(self, request):
+        if request.method == 'GET':
+            token = request.rel_url.query.get('token', '')
+            info = self._peek_pending_auth(token)
+        elif request.method == 'POST':
+            post = await request.post()
+            token = post.get('token', '')
+            info = self._pop_pending_auth(token)
+        else:
+            raise web.HTTPMethodNotAllowed(request.method, ['GET', 'POST'])
+        if info is None:
+            raise web.HTTPFound('/login')
+        roles = self._group_roles(info)
+        if not roles:
+            return self._no_access()
+        effective = roles[0]
+        if request.method == 'GET':
+            buttons = ''.join('<button name="role" value="' + role + '">' +
+                role.title() + '</button> ' for role in roles)
+            return web.Response(content_type='text/html', text=(
+                '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width">'
+                '<title>Caldera — Select role</title></head>'
+                '<body style="font-family:system-ui;max-width:46rem;margin:4rem auto;padding:1rem">'
+                '<h1>Your Caldera roles</h1><p>Only roles granted by your SAML groups are shown. '
+                'Your effective permissions are those of your highest role: <strong>' +
+                effective.title() + '</strong>.</p><form method="post" action="/saml/role-select">'
+                '<input type="hidden" name="token" value="' + self._html_escape(token) + '">' +
+                buttons + '</form></body></html>'))
+        if post.get('role', '').lower() not in roles:
+            return self._no_access()
+        # Choosing a label does not override the deployment's highest-role rule.
+        if not await self._apply_group_role(info, effective):
+            return web.Response(status=403, text='Sign-in could not complete. Contact your Caldera administrator.')
+        return await self._authenticate_user(request, effective, info)
+
+    async def _apply_group_role(self, info, role):
+        roles = self._group_roles(info)
+        if not roles or role != roles[0]:
+            return False
+        auth = self.get_service('auth_svc')
+        username = info.get('email')
+        if not auth or not username:
+            return False
+        # Core Caldera only understands APP, RED and BLUE. Keep the application
+        # roles separate: never place ADMIN/REPORT in Access enum permissions.
+        permissions = {'admin': ('red', 'blue', 'app'), 'red': ('red', 'app'),
+                       'blue': ('blue', 'app'), 'report': ('app',)}[role]
+        existing = auth.user_map.get(username)
+        if existing is not None and tuple(existing.permissions) == permissions:
+            return True
+        if not self._may_write_user(user_exists=existing is not None):
+            return False
+        try:
+            password = getattr(existing, 'password', None) or self._generate_temp_password()
+            auth.user_map[username] = auth.User(username, password, permissions)
+            return tuple(auth.user_map[username].permissions) == permissions
+        except Exception:
+            self.log.error('Could not apply SAML group role for %r', username)
+            return False
+
     async def saml_role_select_handler(self, request):
         """
         GET  /saml/role-select?token=<token>
@@ -722,6 +807,9 @@ class SamlService(BaseService):
         POST /saml/role-select
           — Process role selection (form fields: token, role)
         """
+        if self._group_role_policy() is not None:
+            return await self._group_role_select(request)
+
         if request.method == 'GET':
             token = request.rel_url.query.get('token', '')
             user_info = self._peek_pending_auth(token)
@@ -1133,6 +1221,8 @@ class SamlService(BaseService):
         more than one entitlement. Two users with identical entitlements could
         get different pickers (AWS/Codex review on mnescot/saml#6).
         """
+        if self._group_role_policy() is not None:
+            return set(self._group_roles(user_info))
         matched = set()
         admin_roles, admin_groups = self._admin_allowlists()
         roles = [str(r).lower() for r in user_info.get('roles', [])]
@@ -1170,6 +1260,8 @@ class SamlService(BaseService):
         can never silently confer offensive (`red`) entitlement on an identity the
         IdP asserted nothing about. All comparisons are case-insensitive so an
         Entra casing/format difference does not fall through to a broader tier."""
+        if self._group_role_policy() is not None:
+            return next(iter(self._group_roles(user_info)), None)
         matched = self._asserted_caldera_roles(user_info)
         # Deterministic and order-independent: the most privileged asserted role
         # wins, rather than whichever mapping happened to be listed first.
@@ -1185,6 +1277,8 @@ class SamlService(BaseService):
         the IdP EXPLICITLY asserts a red/admin entitlement (via
         _matched_caldera_role, which ignores default_role), so neither an ordinary
         employee nor a privileged default_role can self-assign the offensive tier."""
+        if self._group_role_policy() is not None:
+            return set(self._group_roles(user_info))
         entitled = {'blue'}
         matched = None
         try:
