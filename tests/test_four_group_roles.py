@@ -390,7 +390,8 @@ def test_group_login_error_redirect_is_denied_instead_of_looping():
 
 
 @pytest.mark.parametrize('failure', ['parse', 'missing_identity', 'replay', 'client_init'])
-def test_direct_acs_failure_is_denied_without_a_login_redirect(failure):
+@pytest.mark.parametrize('path', ['/saml/acs', '/auth/saml/acs', '/saml'])
+def test_direct_acs_failure_is_denied_without_a_login_redirect(failure, path):
     from aiohttp import web
     svc, _ = service()
     svc.log = SimpleNamespace(debug=lambda *args: None, error=lambda *args: None,
@@ -405,7 +406,7 @@ def test_direct_acs_failure_is_denied_without_a_login_redirect(failure):
         return SimpleNamespace(parse_authn_request_response=parse)
     svc._get_saml2_client = client
     svc._claim_assertion = lambda response: failure != 'replay'
-    request = SimpleNamespace(method='POST', path='/saml/acs',
+    request = SimpleNamespace(method='POST', path=path,
                               post=AsyncMock(return_value={'SAMLResponse': 'bad'}))
     with pytest.raises(web.HTTPForbidden):
-        asyncio.run(svc.saml_acs_handler(request))
+        asyncio.run(svc.saml(request) if path == '/saml' else svc.saml_acs_handler(request))

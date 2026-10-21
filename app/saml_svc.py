@@ -635,7 +635,7 @@ class SamlService(BaseService):
                 else:
                     return await self.saml_login_handler(request)
 
-        except web.HTTPRedirection as http_redirect:
+        except (web.HTTPRedirection, web.HTTPUnauthorized, web.HTTPForbidden) as http_redirect:
             raise http_redirect
         except Exception as e:
             self.log.exception('Exception when handling SAML request: %s', e)
