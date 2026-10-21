@@ -963,10 +963,10 @@ class SamlService(BaseService):
             # AuthService.User is the core class-level namedtuple. create_user
             # only accepts one group and cannot express Admin's RED+BLUE or
             # Report's APP-only permissions.
-            auth.user_map[username] = auth.User(username, password, permissions)
-            updated = auth.user_map[username]
+            updated = auth.User(username, password, permissions)
             if tuple(updated.permissions) != permissions:
                 return False
+            auth.user_map[username] = updated
             if isinstance(subject, str) and subject:
                 bindings[username] = (subject, updated, existing is None or bool(owned and binding[2]))
                 self._group_role_accounts = bindings

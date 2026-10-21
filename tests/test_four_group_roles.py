@@ -307,6 +307,17 @@ def test_revocation_during_auth_service_outage_blocks_bound_session_on_recovery(
     assert guarded_response(svc, info['email']).status == 200
 
 
+def test_failed_account_verification_never_publishes_unverified_permissions():
+    svc, auth, info = owned_account()
+    old = auth.user_map[info['email']]
+    auth.User = lambda *args: old
+    assert not asyncio.run(svc._apply_group_role({**info, 'groups': ['P']}, 'report'))
+    assert auth.user_map[info['email']] is old
+    # The ACS/picker failure cleanup can still identify and retire the old entry.
+    svc._revoke_owned_group_account(info)
+    assert info['email'] not in auth.user_map
+
+
 def guarded_response(svc, username, path='/api/v2/operations'):
     import sys
     import types
