@@ -760,6 +760,12 @@ class SamlService(BaseService):
             raise web.HTTPFound('/login')
         roles = self._group_roles(info)
         if not roles:
+            # Invalidate an older core session for this already-verified SAML
+            # subject. Leaving its user_map entry would retain RED/BLUE access
+            # in other tabs after the new sign-in correctly showed No access.
+            auth = self.get_service('auth_svc')
+            if auth is not None:
+                auth.user_map.pop(info.get('email'), None)
             return self._no_access()
         effective = roles[0]
         if request.method == 'GET':

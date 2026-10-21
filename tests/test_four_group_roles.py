@@ -116,3 +116,13 @@ def test_deployment_environment_policy_prevents_fallback_on_missing_or_malformed
     for raw in ('broken', '[]', '{"enabled":false}'):
         with patch.dict('os.environ', {'CALDERA_SAML_RBAC_POLICY': raw}):
             assert svc._entitled_roles({'groups': ['A'], 'roles': ['admin']}) == set()
+
+
+def test_no_membership_revokes_an_existing_core_session_entry():
+    svc, auth = service()
+    auth.user_map['a@example.org'] = auth.User('a@example.org', 'old', ('red', 'app'))
+    svc._peek_pending_auth = lambda token: {'email': 'a@example.org', 'groups': []}
+    request = SimpleNamespace(method='GET', rel_url=SimpleNamespace(query={'token': 'signed'}))
+    result = asyncio.run(svc.saml_role_select_handler(request))
+    assert result.status == 403
+    assert 'a@example.org' not in auth.user_map
