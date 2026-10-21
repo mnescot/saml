@@ -1,9 +1,10 @@
 """Exercise the real aiohttp session/security chain in Caldera's load order."""
 import asyncio
 import ast
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -18,6 +19,7 @@ from test_four_group_roles import owned_account
 
 def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
     svc, auth, info = owned_account()
+    info['authn_expires_at'] = time.time() + 120
     peer = 'peer@example.org'
     peer_info = {'email': peer, 'name_id': 'peer-subject', 'groups': ['B']}
     auth.user_map[peer] = auth.User(peer, 'unchanged', ('blue', 'app'))
@@ -97,6 +99,7 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             assert (await client.get('/api/v2/operations')).status == 200
             assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
             current_cookie = dict(client.session.cookie_jar.filter_cookies(client.make_url('/')))
+            first_grant = next(iter(svc._group_role_session_markers[info['email']].values()))
             client.session.cookie_jar.clear()
             client.session.cookie_jar.update_cookies({k: v.value for k, v in old_cookie.items()})
             assert (await client.get('/test/group-evidence')).status == 401
@@ -104,6 +107,7 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
             # Another unchanged SSO has its own marker and keeps the first alive.
             client.session.cookie_jar.clear()
+            info['authn_expires_at'] = time.time() + 3600
             assert await svc._apply_group_role(info, 'admin')
             assert (await client.get('/saml/test-login', allow_redirects=False)).status == 302
             second_cookie = dict(client.session.cookie_jar.filter_cookies(client.make_url('/')))
@@ -112,6 +116,18 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
                 client.session.cookie_jar.clear()
                 client.session.cookie_jar.update_cookies({k: v.value for k, v in active_cookie.items()})
                 assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
+            # Newer SSO does not extend the older browser's authentication life.
+            with patch('time.time', return_value=first_grant['expires_at'] + 1):
+                assert not svc.current_group_identity(first_grant)
+                client.session.cookie_jar.clear()
+                client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
+                assert (await client.get('/test/group-evidence')).status == 401
+                client.session.cookie_jar.clear()
+                client.session.cookie_jar.update_cookies({k: v.value for k, v in second_cookie.items()})
+                assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
+            client.session.cookie_jar.clear()
+            assert (await client.get('/saml/test-login', allow_redirects=False)).status == 302
+            current_cookie = dict(client.session.cookie_jar.filter_cookies(client.make_url('/')))
             client.session.cookie_jar.clear()
             client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
             assert (await client.get('/logout')).status == 200

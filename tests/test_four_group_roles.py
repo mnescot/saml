@@ -361,7 +361,7 @@ def test_changed_claims_during_core_login_cannot_bind_a_different_assertion():
     with patch.dict(sys.modules, {'aiohttp_session': sessions}), pytest.raises(web.HTTPForbidden):
         asyncio.run(svc._authenticate_user(SimpleNamespace(), 'admin', info))
     assert session == {}
-    assert svc._group_role_session_markers[info['email']] == set()
+    assert svc._group_role_session_markers[info['email']] == {}
 
 
 def test_session_storage_yield_cannot_return_superseded_claims():
@@ -369,7 +369,9 @@ def test_session_storage_yield_cannot_return_superseded_claims():
     import types
     from unittest.mock import patch
     svc, _, info = owned_account()
-    svc._group_role_session_markers[info['email']].add('old-marker')
+    from types import MappingProxyType
+    svc._group_role_session_markers[info['email']]['old-marker'] = MappingProxyType({
+        **svc._group_role_identities[info['email']], 'expires_at': info['authn_expires_at']})
     security = types.ModuleType('aiohttp_security')
     security.authorized_userid = AsyncMock(return_value=info['email'])
     sessions = types.ModuleType('aiohttp_session')
@@ -386,6 +388,42 @@ def test_non_string_group_claims_cannot_enter_immutable_evidence(groups):
     svc, auth = service()
     assert not asyncio.run(svc._apply_group_role(
         {'email': 'a@example.org', 'name_id': 'stable', 'groups': groups}, 'admin'))
+    assert auth.user_map == {}
+
+
+@pytest.mark.parametrize('role', ['admin', 'red', 'blue', 'report'])
+def test_protected_permission_sets_accept_every_native_tuple_order(role):
+    required = {'admin': ('red', 'blue', 'app'), 'red': ('red', 'app'),
+                'blue': ('blue', 'app'), 'report': ('app',)}[role]
+    for permissions in itertools.permutations(required):
+        svc, auth = service()
+        svc._saml_config['user_provisioning']['update_on_login'] = False
+        old = auth.User('a@example.org', 'preserved', permissions)
+        auth.user_map[old.username] = old
+        info = {'email': old.username, 'name_id': 'stable', 'groups': POLICY['groups'][role]}
+        assert asyncio.run(svc._apply_group_role(info, role))
+        assert auth.user_map[old.username] is old
+
+
+@pytest.mark.parametrize('condition,session,expected', [(100, 50, 50), (50, 100, 50),
+    (7200, None, 3600), (None, None, 3600), (-1, None, -1)])
+def test_grant_deadline_uses_earliest_assertion_or_session_limit(condition, session, expected):
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+    svc, _ = service()
+    now = 1800000000
+    stamp = lambda delta: datetime.fromtimestamp(now + delta, timezone.utc).isoformat() if delta is not None else None
+    assertion = SimpleNamespace(conditions=SimpleNamespace(not_on_or_after=stamp(condition)),
+        authn_statement=[SimpleNamespace(session_not_on_or_after=stamp(session))])
+    with patch('time.time', return_value=now):
+        assert svc._group_grant_expiry(SimpleNamespace(assertion=assertion)) == now + expected
+
+
+@pytest.mark.parametrize('expires', [None, float('nan'), float('inf'), -1, True])
+def test_invalid_authentication_lifetime_cannot_provision_a_role(expires):
+    svc, auth = service()
+    info = {'email': 'a@example.org', 'name_id': 'stable', 'groups': ['A'], 'authn_expires_at': expires}
+    assert not asyncio.run(svc._apply_group_role(info, 'admin'))
     assert auth.user_map == {}
 
 

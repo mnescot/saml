@@ -196,3 +196,7 @@ Each completed browser login has its own marker. Concurrent SAML sessions remain
 valid when the subject and asserted groups are unchanged; entitlement/account
 changes invalidate prior grants before another picker completes. Unmarked
 legacy/password cookies also require SAML reauthentication in group-only mode.
+Browser grants expire at the earliest validated assertion/session deadline, with
+a maximum of one hour (also the fallback when the IdP omits a deadline). A new
+login never extends an older browser's grant. Expiry also invalidates copied
+plugin evidence used by background work; reauthenticate to obtain a fresh grant.

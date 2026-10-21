@@ -6,6 +6,7 @@ import logging
 import base64
 import secrets
 import time
+import math
 import urllib.parse
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -139,6 +140,7 @@ _RED_BUTTON_HTML = """<button type="submit" name="role" value="red" class="role-
 class SamlService(BaseService):
     # TTL (seconds) for a pending role-selection auth token
     _PENDING_AUTH_TTL = 300  # 5 minutes
+    _GROUP_SESSION_TTL = 3600  # Recheck direct-SAML entitlements at least hourly.
 
     # How long a consumed assertion is remembered when its own NotOnOrAfter
     # cannot be read. It must exceed any plausible assertion lifetime, because
@@ -689,6 +691,7 @@ class SamlService(BaseService):
                     user_info = self._extract_user_info_from_identity(identity, subject)
 
                     if self._group_role_policy() is not None:
+                        user_info['authn_expires_at'] = self._group_grant_expiry(authn_response)
                         # Older picker tabs cannot reapply a superseded grant.
                         subject_id = user_info.get('name_id')
                         if isinstance(subject_id, str) and subject_id:
@@ -852,7 +855,7 @@ class SamlService(BaseService):
             marker = session.get('saml_assertion_marker')
             if (username and session.get('saml_assertion_subject') == username
                     and isinstance(marker, str)):
-                getattr(self, '_group_role_session_markers', {}).get(username, set()).discard(marker)
+                getattr(self, '_group_role_session_markers', {}).get(username, {}).pop(marker, None)
         if (self._group_role_policy() is not None
                 and request.path not in ('/login', '/logout', '/enter')
                 and request.path != '/saml'
@@ -880,18 +883,17 @@ class SamlService(BaseService):
         identities = getattr(self, '_group_role_identities', {})
         groups = tuple(sorted(set(info['groups'])))
         previous = identities.get(info['email'])
-        if (self.current_group_identity(previous) and previous['name_id'] == info['name_id']
+        if (self._current_group_account(previous) and previous['name_id'] == info['name_id']
                 and previous['groups'] == groups):
             return  # Another successful SSO with unchanged claims keeps live sessions.
         identities[info['email']] = MappingProxyType({
             'subject': info['email'], 'name_id': info['name_id'], 'groups': groups})
         self._group_role_identities = identities
         markers = getattr(self, '_group_role_session_markers', {})
-        markers[info['email']] = set()
+        markers[info['email']] = {}
         self._group_role_session_markers = markers
 
-    def current_group_identity(self, identity):
-        """Revalidate an opaque in-process assertion record, never client data."""
+    def _current_group_account(self, identity):
         if not isinstance(identity, Mapping) or self._group_role_policy() is None:
             return False
         username = identity.get('subject')
@@ -902,6 +904,47 @@ class SamlService(BaseService):
         return bool(auth is not None and binding and binding[0] == identity.get('name_id')
                     and auth.user_map.get(username) is binding[1]
                     and getattr(self, '_group_role_denials', {}).get(username) is not binding[1])
+
+    def _group_grant_expiry(self, response):
+        """Use the validated assertion/session deadline, capped at one hour."""
+        from datetime import datetime
+        expires = time.time() + self._GROUP_SESSION_TTL
+        assertion = getattr(response, 'assertion', None)
+        values = [getattr(getattr(assertion, 'conditions', None), 'not_on_or_after', None)]
+        values.extend(getattr(statement, 'session_not_on_or_after', None)
+                      for statement in (getattr(assertion, 'authn_statement', None) or []))
+        for value in values:
+            if value is None:
+                continue
+            try:
+                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if parsed.tzinfo is None:
+                    return None
+                expires = min(expires, parsed.timestamp())
+            except (AttributeError, ValueError, TypeError, OverflowError):
+                return None
+        return expires
+
+    @staticmethod
+    def _live_group_expiry(expires):
+        return (isinstance(expires, (int, float)) and not isinstance(expires, bool)
+                and math.isfinite(expires) and expires > time.time())
+
+    def current_group_identity(self, identity):
+        """Revalidate an immutable, finite grant belonging to a completed login."""
+        if not isinstance(identity, Mapping) or not self._live_group_expiry(identity.get('expires_at')):
+            return False
+        username = identity.get('subject')
+        canonical = getattr(self, '_group_role_identities', {}).get(username)
+        if not self._current_group_account(canonical):
+            return False
+        markers = getattr(self, '_group_role_session_markers', {}).get(username, {})
+        for marker, grant in list(markers.items()):
+            if not self._live_group_expiry(grant.get('expires_at')):
+                markers.pop(marker, None)
+        return (any(grant is identity for grant in markers.values())
+                and identity.get('name_id') == canonical['name_id']
+                and identity.get('groups') == canonical['groups'])
 
     async def verified_group_identity(self, request):
         """Verified direct-SAML evidence for other plugins when Cognito is off."""
@@ -914,15 +957,12 @@ class SamlService(BaseService):
         from aiohttp_security import authorized_userid
         from aiohttp_session import get_session
         username = await authorized_userid(request)
-        identity = getattr(self, '_group_role_identities', {}).get(username)
-        if not self.current_group_identity(identity):
-            return None
         session = await get_session(request)
-        markers = getattr(self, '_group_role_session_markers', {}).get(username, set())
+        markers = getattr(self, '_group_role_session_markers', {}).get(username, {})
         presented = session.get('saml_assertion_marker')
-        return identity if (self.current_group_identity(identity) and isinstance(presented, str)
-                            and session.get('saml_assertion_subject') == username
-                            and presented in markers) else None
+        identity = markers.get(presented) if isinstance(presented, str) else None
+        return identity if (session.get('saml_assertion_subject') == username
+                            and self.current_group_identity(identity)) else None
 
     async def _bind_group_session(self, request, user_info, identity):
         """Only a completed SAML login may attach the current assertion marker."""
@@ -931,14 +971,18 @@ class SamlService(BaseService):
         from aiohttp_session import get_session
         username = user_info.get('email')
         session = await get_session(request)
-        if not self.current_group_identity(identity):
+        if (not self._current_group_account(identity)
+                or not self._live_group_expiry(user_info.get('authn_expires_at'))):
             raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
         markers = self._group_role_session_markers[username]
+        for stale, grant in list(markers.items()):
+            if not self._live_group_expiry(grant.get('expires_at')):
+                markers.pop(stale, None)
         if (session.get('saml_assertion_subject') == username
                 and isinstance(session.get('saml_assertion_marker'), str)):
-            markers.discard(session.get('saml_assertion_marker'))
+            markers.pop(session.get('saml_assertion_marker'), None)
         marker = secrets.token_urlsafe(32)
-        markers.add(marker)
+        markers[marker] = MappingProxyType({**identity, 'expires_at': user_info['authn_expires_at']})
         session['saml_assertion_marker'] = marker
         session['saml_assertion_subject'] = username
 
@@ -949,6 +993,10 @@ class SamlService(BaseService):
         if (not isinstance(info.get('groups'), (list, tuple))
                 or not all(isinstance(group, str) for group in info['groups'])):
             return False
+        info.setdefault('authn_expires_at', time.time() + self._GROUP_SESSION_TTL)
+        if not self._live_group_expiry(info['authn_expires_at']):
+            return False
+        info['authn_expires_at'] = min(info['authn_expires_at'], time.time() + self._GROUP_SESSION_TTL)
         roles = self._group_roles(info)
         if not roles or role != roles[0]:
             return False
@@ -969,7 +1017,7 @@ class SamlService(BaseService):
         owned = binding is not None and binding[1] is existing
         if owned and binding[0] != subject:
             return False
-        if existing is not None and tuple(existing.permissions) == permissions:
+        if existing is not None and set(existing.permissions) == set(permissions):
             if isinstance(subject, str) and subject:
                 # A configured account may authenticate through SAML without
                 # granting SAML ownership of the underlying local entry.
@@ -989,7 +1037,7 @@ class SamlService(BaseService):
             # only accepts one group and cannot express Admin's RED+BLUE or
             # Report's APP-only permissions.
             updated = auth.User(username, password, permissions)
-            if tuple(updated.permissions) != permissions:
+            if set(updated.permissions) != set(permissions):
                 return False
             auth.user_map[username] = updated
             if isinstance(subject, str) and subject:
@@ -1712,7 +1760,8 @@ class SamlService(BaseService):
         identity = None
         if self._group_role_policy() is not None:
             identity = getattr(self, '_group_role_identities', {}).get(username)
-            if (not self.current_group_identity(identity)
+            if (not self._current_group_account(identity)
+                    or not self._live_group_expiry(user_info.get('authn_expires_at'))
                     or identity.get('name_id') != user_info.get('name_id')
                     or identity.get('groups') != tuple(sorted(set(user_info.get('groups') or [])))):
                 raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
