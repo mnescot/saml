@@ -126,3 +126,54 @@ def test_no_membership_revokes_an_existing_core_session_entry():
     result = asyncio.run(svc.saml_role_select_handler(request))
     assert result.status == 403
     assert 'a@example.org' not in auth.user_map
+
+
+def login_handler(services):
+    import importlib.util
+    import pathlib
+    import sys
+    import types
+    # Model only the core interface; the handler implementation executes intact.
+    class Interface:
+        def __init__(self, *args):
+            pass
+    module = types.ModuleType('app.service.interfaces.i_login_handler')
+    module.LoginHandlerInterface = Interface
+    sys.modules.setdefault(module.__name__, module)
+    spec = importlib.util.spec_from_file_location('group_login_handler',
+        pathlib.Path(__file__).parents[1] / 'app/saml_login_handler.py')
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded.SamlLoginHandler(services)
+
+
+def test_password_submission_cannot_bypass_saml_group_authorization():
+    from unittest.mock import AsyncMock, Mock, patch
+    from aiohttp import web
+    auth = SimpleNamespace(default_login_handler=SimpleNamespace(handle_login=AsyncMock()))
+    saml = SimpleNamespace(saml_login_handler=AsyncMock(side_effect=web.HTTPFound('/idp')))
+    handler = login_handler({'auth_svc': auth, 'saml_svc': saml})
+    request = SimpleNamespace(post=AsyncMock(return_value={'username': 'red', 'password': 'old'}))
+    with patch.dict('os.environ', {'CALDERA_SAML_RBAC_POLICY': '{"enabled":true}'}):
+        try:
+            asyncio.run(handler.handle_login(request))
+        except web.HTTPFound as response:
+            assert response.location == '/idp'
+        else:
+            raise AssertionError('SAML redirect required')
+    auth.default_login_handler.handle_login.assert_not_called()
+    saml.saml_login_handler.assert_awaited_once_with(request)
+
+
+def test_saml_failure_raises_forbidden_so_core_never_uses_password_fallback():
+    from unittest.mock import AsyncMock, patch
+    from aiohttp import web
+    for saml in (None, SimpleNamespace(saml_login_handler=AsyncMock(side_effect=RuntimeError('unavailable')))):
+        handler = login_handler({'saml_svc': saml})
+        with patch.dict('os.environ', {'CALDERA_SAML_RBAC_POLICY': '{"enabled":true}'}):
+            try:
+                asyncio.run(handler.handle_login_redirect(SimpleNamespace()))
+            except web.HTTPForbidden:
+                pass
+            else:
+                raise AssertionError('fail closed with an exception core explicitly propagates')
