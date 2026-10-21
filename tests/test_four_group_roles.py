@@ -364,6 +364,23 @@ def test_changed_claims_during_core_login_cannot_bind_a_different_assertion():
     assert svc._group_role_session_markers[info['email']] == set()
 
 
+def test_session_storage_yield_cannot_return_superseded_claims():
+    import sys
+    import types
+    from unittest.mock import patch
+    svc, _, info = owned_account()
+    svc._group_role_session_markers[info['email']].add('old-marker')
+    security = types.ModuleType('aiohttp_security')
+    security.authorized_userid = AsyncMock(return_value=info['email'])
+    sessions = types.ModuleType('aiohttp_session')
+    async def load_session(request):
+        assert await svc._apply_group_role({**info, 'groups': ['P']}, 'report')
+        return {'saml_assertion_marker': 'old-marker', 'saml_assertion_subject': info['email']}
+    sessions.get_session = load_session
+    with patch.dict(sys.modules, {'aiohttp_security': security, 'aiohttp_session': sessions}):
+        assert asyncio.run(svc.verified_group_identity(SimpleNamespace(headers={}))) is None
+
+
 @pytest.mark.parametrize('groups', [['A', {}], ['A', []], ['A', 1], 'A', None])
 def test_non_string_group_claims_cannot_enter_immutable_evidence(groups):
     svc, auth = service()

@@ -904,10 +904,10 @@ class SamlService(BaseService):
         identity = getattr(self, '_group_role_identities', {}).get(username)
         if not self.current_group_identity(identity):
             return None
-        markers = getattr(self, '_group_role_session_markers', {}).get(username, set())
         session = await get_session(request)
+        markers = getattr(self, '_group_role_session_markers', {}).get(username, set())
         presented = session.get('saml_assertion_marker')
-        return identity if (isinstance(presented, str)
+        return identity if (self.current_group_identity(identity) and isinstance(presented, str)
                             and session.get('saml_assertion_subject') == username
                             and presented in markers) else None
 
