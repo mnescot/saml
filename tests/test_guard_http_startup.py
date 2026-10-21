@@ -53,6 +53,11 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             await security.remember(request, response, username)
             raise response
 
+        async def logout(request):
+            response = web.Response(text='signed out')
+            await security.forget(request, response)
+            return response
+
         auth.handle_successful_login = core_login
 
         async def saml_login(request):
@@ -78,6 +83,7 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             return web.json_response({'groups': list(identity['groups']) if identity else []})
 
         app.router.add_get('/login', login)
+        app.router.add_get('/logout', logout)
         app.router.add_get('/saml/test-login', saml_login)
         app.router.add_get('/api/v2/operations', operation)
         app.router.add_get('/test/group-evidence', group_evidence)
@@ -106,6 +112,18 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
                 client.session.cookie_jar.clear()
                 client.session.cookie_jar.update_cookies({k: v.value for k, v in active_cookie.items()})
                 assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
+            client.session.cookie_jar.clear()
+            client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
+            assert (await client.get('/logout')).status == 200
+            client.session.cookie_jar.clear()
+            client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
+            assert (await client.get('/test/group-evidence')).status == 401
+            client.session.cookie_jar.clear()
+            client.session.cookie_jar.update_cookies({k: v.value for k, v in second_cookie.items()})
+            assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
+            client.session.cookie_jar.clear()
+            assert (await client.get('/saml/test-login', allow_redirects=False)).status == 302
+            current_cookie = dict(client.session.cookie_jar.filter_cookies(client.make_url('/')))
             # Changed claims invalidate both grants before a new picker completes.
             assert await svc._apply_group_role({**info, 'groups': ['A', 'P']}, 'admin')
             for active_cookie in (current_cookie, second_cookie):

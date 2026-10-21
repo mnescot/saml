@@ -844,6 +844,15 @@ class SamlService(BaseService):
     async def guard_group_session(self, request, handler):
         """Reject stale core sessions without rewriting unmanaged accounts."""
         denials = getattr(self, '_group_role_denials', {})
+        if self._group_role_policy() is not None and request.path == '/logout':
+            from aiohttp_security import authorized_userid
+            from aiohttp_session import get_session
+            username = await authorized_userid(request)
+            session = await get_session(request)
+            marker = session.get('saml_assertion_marker')
+            if (username and session.get('saml_assertion_subject') == username
+                    and isinstance(marker, str)):
+                getattr(self, '_group_role_session_markers', {}).get(username, set()).discard(marker)
         if (self._group_role_policy() is not None
                 and request.path not in ('/login', '/logout', '/enter')
                 and request.path != '/saml'
