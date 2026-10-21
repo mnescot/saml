@@ -126,3 +126,77 @@ auth.login.handler.module: plugins.saml.app.saml_login_handler
 
 Restart the Caldera server, and any future authentication requests will now be handled via SAML according
 to the previously established settings.
+
+### Four group-based roles
+
+A deployment can enable `group_role_policy` in `conf/settings.json`:
+
+```json
+{"group_role_policy":{"enabled":true,"groups":{
+  "admin":["<Entra Admin group object ID>"],
+  "red":["<Entra Red group object ID>"],
+  "blue":["<Entra Blue group object ID>"],
+  "report":["<Entra Report group object ID>"]}}}
+```
+
+A deployment can pin the same JSON policy through the root-managed
+`CALDERA_SAML_RBAC_POLICY` environment variable. It takes precedence over the
+settings file; malformed deployment policy denies access.
+
+The standard Entra group-claim URI
+`http://schemas.microsoft.com/ws/2008/06/identity/claims/groups` is recognized
+by default. A configured `user_provisioning.group_attribute` still takes
+precedence when the deployment uses a custom claim name.
+
+Only group membership in the validated SAML assertion grants these roles.
+Role attributes, email domains and the legacy default role do not grant access
+in this mode. The picker offers exactly the user's memberships; no match shows
+**No access**. Effective permissions always follow **Admin > Red > Blue > Report**,
+regardless of which owned label the user selects. Admin receives core Red/Blue
+permissions; Red and Blue keep their corresponding core permissions; Report
+receives application access only. InfoSec Agent separately enforces the same
+group policy for its UI, API and tools. The deployment must configure both.
+
+Existing account-creation/update opt-outs still apply. If the exact permissions
+cannot be applied, sign-in is refused rather than retaining an older role.
+
+Other server-side plugins may call `verified_group_identity(request)` when they
+need direct SAML roles without optional Cognito web identity. It authenticates
+the core cookie session and returns only a live, server-owned assertion record,
+bound to that account and NameID. `current_group_identity(record)` revalidates
+it after changes; copied records, revoked/replaced accounts and machine
+credentials cannot supply this evidence. The record contains no password or
+account credential object.
+
+Successful group-mode sessions are bound to their verified NameID and exact
+core account entry. If a later assertion removes membership or cannot apply a
+role change, old sessions are denied independently of account provisioning.
+Cleanup can delete only an entry this service created, with account updates
+enabled; preconfigured or replaced local accounts are preserved. Denied login
+GETs do not change accounts, and failed SSO does not fall back to passwords or
+loop back through the login page.
+`group_role_policy` absent/disabled preserves the legacy picker for other
+installations.
+
+This plugin runs inside Caldera's single-process server. Core `user_map`, pending
+role-selection tokens and session-revocation bindings are process-local. Running
+concurrent workers or serving replicas requires a shared core identity/session
+backend and is not a supported deployment mode of this plugin. Blue/green
+deployments must send traffic to one active server at a time rather than split
+authenticated sessions across replicas.
+
+Direct-SAML plugin evidence is immutable and belongs only to the browser session
+that completed SSO. A restart or blue/green cutover intentionally expires these
+process-local assertion grants: the next HTML navigation redirects to
+`/saml/login`, while API requests return HTTP 401 with
+`error=saml_reauthentication_required` and `login_url=/saml/login`. Complete SAML
+sign-in again to restore access; existing cookies cannot inherit another login's
+new privileges. Machine credentials retain their separately bounded permissions.
+Each completed browser login has its own marker. Concurrent SAML sessions remain
+valid when the subject and asserted groups are unchanged; entitlement/account
+changes invalidate prior grants before another picker completes. Unmarked
+legacy/password cookies also require SAML reauthentication in group-only mode.
+Browser grants expire at the earliest validated assertion/session deadline, with
+a maximum of one hour (also the fallback when the IdP omits a deadline). A new
+login never extends an older browser's grant. Expiry also invalidates copied
+plugin evidence used by background work; reauthenticate to obtain a fresh grant.

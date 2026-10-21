@@ -1,4 +1,5 @@
 from plugins.saml.app.saml_svc import SamlService
+from aiohttp import web
 
 name = 'SAML'
 description = 'A plugin that provides SAML authentication for CALDERA'
@@ -7,6 +8,17 @@ address = None
 async def enable(services):
     app = services.get('app_svc').application
     saml_svc = SamlService()
+
+    @web.middleware
+    async def group_session_guard(request, handler):
+        return await saml_svc.guard_group_session(request, handler)
+
+    async def install_group_session_guard(application):
+        # Plugins load before AuthService.apply installs aiohttp-session.
+        # Startup runs after that setup, before the middleware chain freezes.
+        application.middlewares.append(group_session_guard)
+
+    app.on_startup.append(install_group_session_guard)
 
     # Register specific handlers for each endpoint using the correct method names
     app.router.add_route('GET', '/saml/login', saml_svc.saml_login_handler)
