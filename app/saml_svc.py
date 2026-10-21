@@ -865,7 +865,7 @@ class SamlService(BaseService):
             if username:
                 from aiohttp_session import get_session
                 session = await get_session(request)
-                if await self.verified_group_identity(request) is None:
+                if await self._session_group_identity(request) is None:
                     # A cutover/restart deliberately expires process-local
                     # assertion grants. Reauthenticate instead of stranding a
                     # valid core cookie at the plugin's generic role denial.
@@ -907,6 +907,10 @@ class SamlService(BaseService):
         """Verified direct-SAML evidence for other plugins when Cognito is off."""
         if any(name.lower() in ('key', 'authorization') for name in request.headers):
             return None
+        return await self._session_group_identity(request)
+
+    async def _session_group_identity(self, request):
+        """Validate cookie proof independently of any alternate auth header."""
         from aiohttp_security import authorized_userid
         from aiohttp_session import get_session
         username = await authorized_userid(request)

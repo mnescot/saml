@@ -401,7 +401,7 @@ def guarded_response(svc, username, path='/api/v2/operations'):
     handler = AsyncMock(return_value=web.Response(text='allowed'))
     # Isolate denial-account handling; real HTTP tests cover SSO-marker admission.
     with patch.dict(sys.modules, {'aiohttp_security': security, 'aiohttp_session': sessions}), \
-            patch.object(svc, 'verified_group_identity', AsyncMock(return_value=object())):
+            patch.object(svc, '_session_group_identity', AsyncMock(return_value=object())):
         result = asyncio.run(svc.guard_group_session(SimpleNamespace(path=path, headers={}), handler))
     assert handler.await_count == (0 if result.status == 403 else 1)
     return result

@@ -144,9 +144,11 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             assert await svc._apply_group_role(info, 'admin')
             assert (await client.get('/saml/test-login', allow_redirects=False)).status == 302
             assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
-            # An alternate header cannot convert this cookie into machine auth.
-            assert (await client.get('/test/group-evidence', headers={'KEY': 'unused'})).status == 401
-            assert (await client.get('/saml/test-login', allow_redirects=False)).status == 302
+            # Mixed headers neither lend cookie claims to API auth nor destroy
+            # a correctly authenticated browser session.
+            for mixed in ({'KEY': 'unused'}, {'Authorization': 'Bearer unused'}):
+                assert await (await client.get('/test/group-evidence', headers=mixed)).json() == {'groups': []}
+                assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
             old = auth.user_map[info['email']]
             svc._saml_config['user_provisioning']['update_on_login'] = False
             assert not await svc._apply_group_role({**info, 'groups': ['P']}, 'report')
