@@ -290,6 +290,9 @@ def test_plugin_enable_registers_the_session_guard():
     async def check():
         app = web.Application()
         await namespace['enable']({'app_svc': SimpleNamespace(application=app)})
+        assert len(app.middlewares) == 0
+        app.on_startup.freeze()
+        await app.startup()
         assert len(app.middlewares) == 1
         handler = AsyncMock(return_value=web.Response(text='allowed'))
         assert (await app.middlewares[0](SimpleNamespace(path='/api/v2/operations'), handler)).status == 200

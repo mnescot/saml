@@ -13,7 +13,12 @@ async def enable(services):
     async def group_session_guard(request, handler):
         return await saml_svc.guard_group_session(request, handler)
 
-    app.middlewares.append(group_session_guard)
+    async def install_group_session_guard(application):
+        # Plugins load before AuthService.apply installs aiohttp-session.
+        # Startup runs after that setup, before the middleware chain freezes.
+        application.middlewares.append(group_session_guard)
+
+    app.on_startup.append(install_group_session_guard)
 
     # Register specific handlers for each endpoint using the correct method names
     app.router.add_route('GET', '/saml/login', saml_svc.saml_login_handler)
