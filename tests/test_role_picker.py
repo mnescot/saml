@@ -68,6 +68,11 @@ class _User:
 
 
 class _AuthSvc:
+    # AuthService exposes this constructor on the class, including the pinned
+    # Caldera 3735d9eb core. Match that interface rather than adding it per test.
+    from collections import namedtuple
+    User = namedtuple('User', 'username password permissions')
+
     def __init__(self, user_map=None, fail=False):
         self.user_map = user_map or {}
         self.fail = fail
@@ -77,7 +82,7 @@ class _AuthSvc:
         if self.fail:
             raise RuntimeError('simulated create_user failure')
         self.created.append((username, group))
-        self.user_map[username] = _User(username, password, (group, 'app'))
+        self.user_map[username] = self.User(username, password, (group, 'app'))
 
 
 def _service(mapping=None, auth_svc=None, log=None):

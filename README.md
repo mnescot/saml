@@ -143,6 +143,11 @@ A deployment can pin the same JSON policy through the root-managed
 `CALDERA_SAML_RBAC_POLICY` environment variable. It takes precedence over the
 settings file; malformed deployment policy denies access.
 
+The standard Entra group-claim URI
+`http://schemas.microsoft.com/ws/2008/06/identity/claims/groups` is recognized
+by default. A configured `user_provisioning.group_attribute` still takes
+precedence when the deployment uses a custom claim name.
+
 Only group membership in the validated SAML assertion grants these roles.
 Role attributes, email domains and the legacy default role do not grant access
 in this mode. The picker offers exactly the user's memberships; no match shows

@@ -806,6 +806,9 @@ class SamlService(BaseService):
             return False
         try:
             password = getattr(existing, 'password', None) or self._generate_temp_password()
+            # AuthService.User is the core class-level namedtuple. create_user
+            # only accepts one group and cannot express Admin's RED+BLUE or
+            # Report's APP-only permissions.
             auth.user_map[username] = auth.User(username, password, permissions)
             return tuple(auth.user_map[username].permissions) == permissions
         except Exception:
@@ -1081,6 +1084,7 @@ class SamlService(BaseService):
         user_info['groups'] = self._identity_values(identity, [
             up.get('group_attribute'),
             'group', 'groups', 'Group', 'Groups', 'memberOf',
+            'http://schemas.microsoft.com/ws/2008/06/identity/claims/groups',
             'http://schemas.xmlsoap.org/claims/Group',
         ])
 

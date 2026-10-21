@@ -2,7 +2,6 @@
 import asyncio
 import itertools
 from types import SimpleNamespace
-from collections import namedtuple
 
 from test_role_picker import _service, _AuthSvc
 
@@ -11,7 +10,6 @@ POLICY = {'enabled': True, 'groups': {'admin': ['A'], 'red': ['R'], 'blue': ['B'
 
 def service(auth=None):
     auth = auth or _AuthSvc()
-    auth.User = namedtuple('User', 'username password permissions')
     svc = _service(auth_svc=auth)
     svc._saml_config = {'group_role_policy': POLICY, 'user_provisioning': {
         'enabled': True, 'create_missing_users': True, 'update_on_login': True,
@@ -126,6 +124,26 @@ def test_no_membership_revokes_an_existing_core_session_entry():
     result = asyncio.run(svc.saml_role_select_handler(request))
     assert result.status == 403
     assert 'a@example.org' not in auth.user_map
+
+
+def test_entra_group_claim_uri_works_without_an_attribute_override():
+    svc, _ = service()
+    info = svc._extract_user_info_from_identity({
+        'email': ['a@example.org'],
+        'http://schemas.microsoft.com/ws/2008/06/identity/claims/groups': ['A', 'P'],
+    }, SimpleNamespace(text='subject'))
+    assert info['groups'] == ['A', 'P']
+    assert svc._group_roles(info) == ['admin', 'report']
+
+
+def test_configured_group_attribute_retains_precedence_over_entra_fallback():
+    svc, _ = service()
+    svc._saml_config['user_provisioning']['group_attribute'] = 'custom-groups'
+    info = svc._extract_user_info_from_identity({
+        'email': ['a@example.org'], 'custom-groups': ['P'],
+        'http://schemas.microsoft.com/ws/2008/06/identity/claims/groups': ['A'],
+    }, SimpleNamespace(text='subject'))
+    assert svc._group_roles(info) == ['report']
 
 
 def login_handler(services):
