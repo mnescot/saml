@@ -191,6 +191,21 @@ def test_role_changes_retain_subject_binding_but_a_different_subject_is_denied()
     assert 'a@example.org' not in auth.user_map
 
 
+@pytest.mark.parametrize('updates', [True, False])
+def test_renamed_subject_retires_old_username_before_lower_role_login(updates):
+    svc, auth, info = owned_account()
+    svc._saml_config['user_provisioning']['update_on_login'] = updates
+    renamed = {**info, 'email': 'new@example.org', 'groups': ['P']}
+    assert asyncio.run(svc._apply_group_role(renamed, 'report'))
+    assert auth.user_map['new@example.org'].permissions == ('app',)
+    if updates:
+        assert info['email'] not in auth.user_map
+    else:
+        assert info['email'] in auth.user_map
+        assert guarded_response(svc, info['email']).status == 403
+    assert guarded_response(svc, renamed['email']).status == 200
+
+
 def test_verified_no_access_acs_post_revokes_owned_session_before_a_picker_exists():
     svc, auth, info = owned_account()
     response = SimpleNamespace(get_identity=lambda: {'email': [info['email']]},
@@ -372,3 +387,25 @@ def test_group_login_error_redirect_is_denied_instead_of_looping():
     with patch.dict('os.environ', {'CALDERA_SAML_RBAC_POLICY': '{"enabled":true}'}):
         with pytest.raises(web.HTTPForbidden):
             asyncio.run(handler.handle_login_redirect(SimpleNamespace()))
+
+
+@pytest.mark.parametrize('failure', ['parse', 'missing_identity', 'replay', 'client_init'])
+def test_direct_acs_failure_is_denied_without_a_login_redirect(failure):
+    from aiohttp import web
+    svc, _ = service()
+    svc.log = SimpleNamespace(debug=lambda *args: None, error=lambda *args: None,
+                              exception=lambda *args: None)
+    def parse(*args):
+        if failure == 'parse':
+            raise ValueError('bad assertion')
+        return SimpleNamespace(get_identity=lambda: {}, get_subject=lambda: SimpleNamespace(text='id'))
+    def client():
+        if failure == 'client_init':
+            raise ValueError('IdP unavailable')
+        return SimpleNamespace(parse_authn_request_response=parse)
+    svc._get_saml2_client = client
+    svc._claim_assertion = lambda response: failure != 'replay'
+    request = SimpleNamespace(method='POST', path='/saml/acs',
+                              post=AsyncMock(return_value={'SAMLResponse': 'bad'}))
+    with pytest.raises(web.HTTPForbidden):
+        asyncio.run(svc.saml_acs_handler(request))

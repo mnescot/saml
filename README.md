@@ -168,3 +168,10 @@ GETs do not change accounts, and failed SSO does not fall back to passwords or
 loop back through the login page.
 `group_role_policy` absent/disabled preserves the legacy picker for other
 installations.
+
+This plugin runs inside Caldera's single-process server. Core `user_map`, pending
+role-selection tokens and session-revocation bindings are process-local. Running
+concurrent workers or serving replicas requires a shared core identity/session
+backend and is not a supported deployment mode of this plugin. Blue/green
+deployments must send traffic to one active server at a time rather than split
+authenticated sessions across replicas.

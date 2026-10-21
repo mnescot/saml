@@ -717,10 +717,14 @@ class SamlService(BaseService):
             self.log.debug(f'Redirecting to IdP: {redirect_url}')
             raise web.HTTPFound(redirect_url)
 
-        except web.HTTPRedirection:
+        except web.HTTPRedirection as redirect:
+            if self._group_role_policy() is not None and redirect.location == '/login':
+                raise web.HTTPForbidden(text='SAML sign-in could not complete. Contact your administrator.') from None
             raise
         except Exception as e:
             self.log.exception(f'SAML login error: {e}')
+            if self._group_role_policy() is not None:
+                raise web.HTTPForbidden(text='SAML sign-in could not complete. Contact your administrator.') from None
             raise web.HTTPFound('/login')
 
     def _group_role_policy(self):
@@ -796,7 +800,7 @@ class SamlService(BaseService):
             return web.Response(status=403, text='Sign-in could not complete. Contact your Caldera administrator.')
         return await self._authenticate_user(request, effective, info)
 
-    def _revoke_owned_group_account(self, info):
+    def _revoke_owned_group_account(self, info, *, except_username=None):
         subject = info.get('name_id')
         if not isinstance(subject, str) or not subject:
             return
@@ -805,7 +809,7 @@ class SamlService(BaseService):
             return
         bindings = getattr(self, '_group_role_accounts', {})
         for username, (bound_subject, owned_user, may_delete) in list(bindings.items()):
-            if bound_subject != subject:
+            if bound_subject != subject or username == except_username:
                 continue
             if auth.user_map.get(username) is owned_user:
                 if not may_delete or not self._may_write_user(user_exists=True):
@@ -841,6 +845,9 @@ class SamlService(BaseService):
         username = info.get('email')
         if not auth or not username:
             return False
+        # A NameID's former usernames must not retain sessions after a rename,
+        # including when the new username is provisioned with a lower role.
+        self._revoke_owned_group_account(info, except_username=username)
         # Core Caldera only understands APP, RED and BLUE. Keep the application
         # roles separate: never place ADMIN/REPORT in Access enum permissions.
         permissions = {'admin': ('red', 'blue', 'app'), 'red': ('red', 'app'),
