@@ -184,3 +184,11 @@ concurrent workers or serving replicas requires a shared core identity/session
 backend and is not a supported deployment mode of this plugin. Blue/green
 deployments must send traffic to one active server at a time rather than split
 authenticated sessions across replicas.
+
+Direct-SAML plugin evidence is immutable and belongs only to the browser session
+that completed SSO. A restart or blue/green cutover intentionally expires these
+process-local assertion grants: the next HTML navigation redirects to
+`/saml/login`, while API requests return HTTP 401 with
+`error=saml_reauthentication_required` and `login_url=/saml/login`. Complete SAML
+sign-in again to restore access; existing cookies cannot inherit another login's
+new privileges. Machine credentials retain their separately bounded permissions.

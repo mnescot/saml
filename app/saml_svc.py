@@ -844,7 +844,7 @@ class SamlService(BaseService):
     async def guard_group_session(self, request, handler):
         """Reject stale core sessions without rewriting unmanaged accounts."""
         denials = getattr(self, '_group_role_denials', {})
-        if (self._group_role_policy() is not None and denials
+        if (self._group_role_policy() is not None
                 and request.path not in ('/login', '/logout', '/enter')
                 and request.path != '/saml'
                 and not request.path.startswith(('/saml/', '/auth/saml/'))):
@@ -853,6 +853,20 @@ class SamlService(BaseService):
             auth = self.get_service('auth_svc')
             if username in denials and auth is not None and auth.user_map.get(username) is denials[username]:
                 return self._no_access()
+            if (username and not any(name.lower() in ('key', 'authorization') for name in request.headers)):
+                from aiohttp_session import get_session
+                session = await get_session(request)
+                if (isinstance(session.get('saml_assertion_marker'), str)
+                        and session.get('saml_assertion_subject') == username
+                        and await self.verified_group_identity(request) is None):
+                    # A cutover/restart deliberately expires process-local
+                    # assertion grants. Reauthenticate instead of stranding a
+                    # valid core cookie at the plugin's generic role denial.
+                    session.invalidate()
+                    if request.method == 'GET' and 'text/html' in request.headers.get('Accept', ''):
+                        return web.HTTPFound('/saml/login')
+                    return web.json_response({'error': 'saml_reauthentication_required',
+                                              'login_url': '/saml/login'}, status=401)
         return await handler(request)
 
     def _remember_group_identity(self, info):
@@ -888,8 +902,10 @@ class SamlService(BaseService):
         if not self.current_group_identity(identity):
             return None
         marker = getattr(self, '_group_role_session_markers', {}).get(username)
-        presented = (await get_session(request)).get('saml_assertion_marker')
+        session = await get_session(request)
+        presented = session.get('saml_assertion_marker')
         return identity if (isinstance(marker, str) and isinstance(presented, str)
+                            and session.get('saml_assertion_subject') == username
                             and secrets.compare_digest(marker, presented)) else None
 
     async def _bind_group_session(self, request, user_info):
@@ -902,7 +918,9 @@ class SamlService(BaseService):
         marker = getattr(self, '_group_role_session_markers', {}).get(username)
         if not self.current_group_identity(identity) or not isinstance(marker, str):
             raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
-        (await get_session(request))['saml_assertion_marker'] = marker
+        session = await get_session(request)
+        session['saml_assertion_marker'] = marker
+        session['saml_assertion_subject'] = username
 
     async def _apply_group_role(self, info, role):
         roles = self._group_roles(info)

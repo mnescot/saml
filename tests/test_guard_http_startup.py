@@ -93,7 +93,9 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
             # Fresh ACS evidence alone cannot upgrade any existing cookie.
             assert await svc._apply_group_role(info, 'admin')
-            assert await (await client.get('/test/group-evidence')).json() == {'groups': []}
+            expired = await client.get('/test/group-evidence')
+            assert expired.status == 401
+            assert await expired.json() == {'error': 'saml_reauthentication_required', 'login_url': '/saml/login'}
             assert (await client.get('/test/saml-login', allow_redirects=False)).status == 302
             assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
             assert await (await client.get('/test/group-evidence', headers={'KEY': 'unused'})).json() == {'groups': []}
@@ -106,11 +108,29 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             assert executed == [info['email']]
             assert (await client.get('/login', params={'who': peer})).status == 200
             assert (await client.get('/api/v2/operations')).status == 200
+
             assert await (await client.get('/test/group-evidence')).json() == {'groups': []}
             client.session.cookie_jar.clear()
             assert (await client.get('/api/v2/operations')).status == 401
             assert await svc._apply_group_role(info, 'admin')
             assert (await client.get('/login', params={'who': info['email']})).status == 200
             assert (await client.get('/api/v2/operations')).status == 200
+
+            assert (await client.get('/test/saml-login', allow_redirects=False)).status == 302
+            restart_cookie = dict(client.session.cookie_jar.filter_cookies(client.make_url('/')))
+            svc._group_role_identities.clear()
+            svc._group_role_session_markers.clear()
+            # A new serving process cannot restore grants from its predecessor.
+            expired = await client.get('/api/v2/operations')
+            assert expired.status == 401
+            assert (await expired.json())['login_url'] == '/saml/login'
+            client.session.cookie_jar.clear()
+            client.session.cookie_jar.update_cookies({k: v.value for k, v in restart_cookie.items()})
+            redirected = await client.get('/api/v2/operations', headers={'Accept': 'text/html'}, allow_redirects=False)
+            assert redirected.status == 302 and redirected.headers['Location'] == '/saml/login'
+            assert await svc._apply_group_role(info, 'admin')
+            assert (await client.get('/test/saml-login', allow_redirects=False)).status == 302
+            assert (await client.get('/api/v2/operations')).status == 200
+            assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
 
     asyncio.run(exercise())

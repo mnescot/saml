@@ -314,9 +314,11 @@ def guarded_response(svc, username, path='/api/v2/operations'):
     from aiohttp import web
     security = types.ModuleType('aiohttp_security')
     security.authorized_userid = AsyncMock(return_value=username)
+    sessions = types.ModuleType('aiohttp_session')
+    sessions.get_session = AsyncMock(return_value={})
     handler = AsyncMock(return_value=web.Response(text='allowed'))
-    with patch.dict(sys.modules, {'aiohttp_security': security}):
-        result = asyncio.run(svc.guard_group_session(SimpleNamespace(path=path), handler))
+    with patch.dict(sys.modules, {'aiohttp_security': security, 'aiohttp_session': sessions}):
+        result = asyncio.run(svc.guard_group_session(SimpleNamespace(path=path, headers={}), handler))
     assert handler.await_count == (0 if result.status == 403 else 1)
     return result
 
@@ -381,7 +383,7 @@ def test_plugin_enable_registers_the_session_guard():
         await app.startup()
         assert len(app.middlewares) == 1
         handler = AsyncMock(return_value=web.Response(text='allowed'))
-        assert (await app.middlewares[0](SimpleNamespace(path='/api/v2/operations'), handler)).status == 200
+        assert (await app.middlewares[0](SimpleNamespace(path='/api/v2/operations', config_dict={}), handler)).status == 200
         svc.set_saml_login_handler.assert_awaited_once()
     asyncio.run(check())
 
