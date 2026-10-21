@@ -103,3 +103,16 @@ def test_forged_admin_post_is_denied_before_any_account_mutation():
     result = asyncio.run(svc.saml_role_select_handler(SimpleNamespace(method='POST', post=post)))
     assert result.status == 403 and 'No access' in result.text
     assert not auth.user_map
+
+
+def test_deployment_environment_policy_prevents_fallback_on_missing_or_malformed_settings():
+    import json
+    from unittest.mock import patch
+    svc, _ = service()
+    svc._saml_config = {}
+    with patch.dict('os.environ', {'CALDERA_SAML_RBAC_POLICY': json.dumps(POLICY)}):
+        assert svc._group_roles({'groups': ['B']}) == ['blue']
+        assert svc._entitled_roles({'groups': [], 'roles': ['admin']}) == set()
+    for raw in ('broken', '[]', '{"enabled":false}'):
+        with patch.dict('os.environ', {'CALDERA_SAML_RBAC_POLICY': raw}):
+            assert svc._entitled_roles({'groups': ['A'], 'roles': ['admin']}) == set()

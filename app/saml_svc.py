@@ -715,6 +715,13 @@ class SamlService(BaseService):
             raise web.HTTPFound('/login')
 
     def _group_role_policy(self):
+        raw = os.environ.get('CALDERA_SAML_RBAC_POLICY')
+        if raw is not None:
+            try:
+                value = json.loads(raw)
+            except (ValueError, TypeError):
+                return {'enabled': True, 'groups': {}}
+            return value if isinstance(value, dict) and value.get('enabled') is True else {'enabled': True, 'groups': {}}
         value = self._saml_config.get('group_role_policy')
         return value if isinstance(value, dict) and value.get('enabled') is True else None
 

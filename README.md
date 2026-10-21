@@ -139,6 +139,10 @@ A deployment can enable `group_role_policy` in `conf/settings.json`:
   "report":["<Entra Report group object ID>"]}}}
 ```
 
+A deployment can pin the same JSON policy through the root-managed
+`CALDERA_SAML_RBAC_POLICY` environment variable. It takes precedence over the
+settings file; malformed deployment policy denies access.
+
 Only group membership in the validated SAML assertion grants these roles.
 Role attributes, email domains and the legacy default role do not grant access
 in this mode. The picker offers exactly the user's memberships; no match shows
