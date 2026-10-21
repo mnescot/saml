@@ -160,6 +160,10 @@ class SamlService(BaseService):
         # In-memory store for pending (post-SAML, pre-role-select) auth state.
         # Keys are random tokens; values are dicts with user_info + expiry.
         self._pending_auth: Dict[str, Dict[str, Any]] = {}
+        # Bind successful SAML sessions to their verified subject and User
+        # object. Only entries created here may be deleted on revocation.
+        self._group_role_accounts = {}
+        self._group_role_denials = {}
 
         # One-time-use record for consumed assertions, keyed by assertion ID and
         # held until that assertion's own NotOnOrAfter. See _claim_assertion.
@@ -681,6 +685,11 @@ class SamlService(BaseService):
                     # Extract user info from SAML attributes
                     user_info = self._extract_user_info_from_identity(identity, subject)
 
+                    if self._group_role_policy() is not None and not self._group_roles(user_info):
+                        # This POST has already consumed the validated assertion.
+                        self._revoke_owned_group_account(user_info)
+                        return self._no_access()
+
                     # Store pending auth and redirect to role selection page
                     token = self._store_pending_auth(user_info)
                     self.log.info(
@@ -760,12 +769,12 @@ class SamlService(BaseService):
             raise web.HTTPFound('/login')
         roles = self._group_roles(info)
         if not roles:
-            # Invalidate an older core session for this already-verified SAML
-            # subject. Leaving its user_map entry would retain RED/BLUE access
-            # in other tabs after the new sign-in correctly showed No access.
-            auth = self.get_service('auth_svc')
-            if auth is not None:
-                auth.user_map.pop(info.get('email'), None)
+            if request.method == 'POST':
+                self._revoke_owned_group_account(info)
+            else:
+                # GET never changes a core account. Consume the denied picker
+                # token too; legitimate no-access cleanup occurs at ACS POST.
+                self._pop_pending_auth(token)
             return self._no_access()
         effective = roles[0]
         if request.method == 'GET':
@@ -787,6 +796,43 @@ class SamlService(BaseService):
             return web.Response(status=403, text='Sign-in could not complete. Contact your Caldera administrator.')
         return await self._authenticate_user(request, effective, info)
 
+    def _revoke_owned_group_account(self, info):
+        subject = info.get('name_id')
+        if not isinstance(subject, str) or not subject:
+            return
+        auth = self.get_service('auth_svc')
+        if auth is None:
+            return
+        bindings = getattr(self, '_group_role_accounts', {})
+        for username, (bound_subject, owned_user, may_delete) in list(bindings.items()):
+            if bound_subject != subject:
+                continue
+            if auth.user_map.get(username) is owned_user:
+                if not may_delete or not self._may_write_user(user_exists=True):
+                    # Opt-outs prohibit account changes, not continued access
+                    # using permissions a current assertion has revoked.
+                    denials = getattr(self, '_group_role_denials', {})
+                    denials[username] = owned_user
+                    self._group_role_denials = denials
+                    continue
+                auth.user_map.pop(username)
+            bindings.pop(username, None)
+            getattr(self, '_group_role_denials', {}).pop(username, None)
+
+    async def guard_group_session(self, request, handler):
+        """Reject stale core sessions without rewriting unmanaged accounts."""
+        denials = getattr(self, '_group_role_denials', {})
+        if (self._group_role_policy() is not None and denials
+                and request.path not in ('/login', '/logout', '/enter')
+                and request.path != '/saml'
+                and not request.path.startswith(('/saml/', '/auth/saml/'))):
+            from aiohttp_security import authorized_userid
+            username = await authorized_userid(request)
+            auth = self.get_service('auth_svc')
+            if username in denials and auth is not None and auth.user_map.get(username) is denials[username]:
+                return self._no_access()
+        return await handler(request)
+
     async def _apply_group_role(self, info, role):
         roles = self._group_roles(info)
         if not roles or role != roles[0]:
@@ -800,9 +846,23 @@ class SamlService(BaseService):
         permissions = {'admin': ('red', 'blue', 'app'), 'red': ('red', 'app'),
                        'blue': ('blue', 'app'), 'report': ('app',)}[role]
         existing = auth.user_map.get(username)
+        bindings = getattr(self, '_group_role_accounts', {})
+        subject = info.get('name_id')
+        binding = bindings.get(username)
+        owned = binding is not None and binding[1] is existing
+        if owned and binding[0] != subject:
+            return False
         if existing is not None and tuple(existing.permissions) == permissions:
+            if isinstance(subject, str) and subject:
+                # A configured account may authenticate through SAML without
+                # granting SAML ownership of the underlying local entry.
+                bindings[username] = (subject, existing, bool(owned and binding[2]))
+                self._group_role_accounts = bindings
+            if owned:
+                getattr(self, '_group_role_denials', {}).pop(username, None)
             return True
         if not self._may_write_user(user_exists=existing is not None):
+            self._revoke_owned_group_account(info)
             return False
         try:
             password = getattr(existing, 'password', None) or self._generate_temp_password()
@@ -810,9 +870,17 @@ class SamlService(BaseService):
             # only accepts one group and cannot express Admin's RED+BLUE or
             # Report's APP-only permissions.
             auth.user_map[username] = auth.User(username, password, permissions)
-            return tuple(auth.user_map[username].permissions) == permissions
+            updated = auth.user_map[username]
+            if tuple(updated.permissions) != permissions:
+                return False
+            if isinstance(subject, str) and subject:
+                bindings[username] = (subject, updated, existing is None or bool(owned and binding[2]))
+                self._group_role_accounts = bindings
+                getattr(self, '_group_role_denials', {}).pop(username, None)
+            return True
         except Exception:
             self.log.error('Could not apply SAML group role for %r', username)
+            self._revoke_owned_group_account(info)
             return False
 
     async def saml_role_select_handler(self, request):

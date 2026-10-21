@@ -21,8 +21,12 @@ class SamlLoginHandler(LoginHandlerInterface):
         if os.environ.get('CALDERA_SAML_RBAC_POLICY') is not None:
             return True
         service = self.services.get('saml_svc')
+        if service is None:
+            # The selected SAML handler cannot prove that password fallback is
+            # allowed when its policy-owning service is unavailable.
+            return True
         try:
-            return service is not None and service._group_role_policy() is not None
+            return service._group_role_policy() is not None
         except Exception:
             return True
 
@@ -55,7 +59,11 @@ class SamlLoginHandler(LoginHandlerInterface):
                 if service is None:
                     raise RuntimeError('SAML service unavailable')
                 return await service.saml_login_handler(request)
-            except (web.HTTPRedirection, web.HTTPUnauthorized, web.HTTPForbidden):
+            except web.HTTPRedirection as redirect:
+                if redirect.location == '/login':
+                    raise web.HTTPForbidden(text='SAML sign-in could not complete. Contact your administrator.') from None
+                raise
+            except (web.HTTPUnauthorized, web.HTTPForbidden):
                 raise
             except Exception:
                 raise web.HTTPForbidden(text='SAML sign-in is unavailable. Please try again.') from None

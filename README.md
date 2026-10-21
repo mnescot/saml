@@ -159,5 +159,12 @@ group policy for its UI, API and tools. The deployment must configure both.
 
 Existing account-creation/update opt-outs still apply. If the exact permissions
 cannot be applied, sign-in is refused rather than retaining an older role.
+Successful group-mode sessions are bound to their verified NameID and exact
+core account entry. If a later assertion removes membership or cannot apply a
+role change, old sessions are denied independently of account provisioning.
+Cleanup can delete only an entry this service created, with account updates
+enabled; preconfigured or replaced local accounts are preserved. Denied login
+GETs do not change accounts, and failed SSO does not fall back to passwords or
+loop back through the login page.
 `group_role_policy` absent/disabled preserves the legacy picker for other
 installations.

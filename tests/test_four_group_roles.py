@@ -2,6 +2,8 @@
 import asyncio
 import itertools
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+import pytest
 
 from test_role_picker import _service, _AuthSvc
 
@@ -11,6 +13,7 @@ POLICY = {'enabled': True, 'groups': {'admin': ['A'], 'red': ['R'], 'blue': ['B'
 def service(auth=None):
     auth = auth or _AuthSvc()
     svc = _service(auth_svc=auth)
+    svc._pending_auth = {}
     svc._saml_config = {'group_role_policy': POLICY, 'user_provisioning': {
         'enabled': True, 'create_missing_users': True, 'update_on_login': True,
         'default_role': 'admin', 'admin_roles': ['admin']}}
@@ -116,14 +119,167 @@ def test_deployment_environment_policy_prevents_fallback_on_missing_or_malformed
             assert svc._entitled_roles({'groups': ['A'], 'roles': ['admin']}) == set()
 
 
-def test_no_membership_revokes_an_existing_core_session_entry():
+def test_no_membership_get_does_not_remove_an_existing_core_account():
     svc, auth = service()
     auth.user_map['a@example.org'] = auth.User('a@example.org', 'old', ('red', 'app'))
     svc._peek_pending_auth = lambda token: {'email': 'a@example.org', 'groups': []}
     request = SimpleNamespace(method='GET', rel_url=SimpleNamespace(query={'token': 'signed'}))
     result = asyncio.run(svc.saml_role_select_handler(request))
     assert result.status == 403
+    assert 'a@example.org' in auth.user_map
+
+
+def owned_account():
+    svc, auth = service()
+    info = {'email': 'a@example.org', 'name_id': 'stable-subject', 'groups': ['A']}
+    assert asyncio.run(svc._apply_group_role(info, 'admin'))
+    return svc, auth, info
+
+
+def deny_post(svc, info):
+    token = svc._store_pending_auth(info)
+    request = SimpleNamespace(method='POST', post=AsyncMock(return_value={'token': token}))
+    result = asyncio.run(svc.saml_role_select_handler(request))
+    assert result.status == 403
+    assert svc._pop_pending_auth(token) is None
+    return result
+
+
+def test_revocation_post_removes_only_an_account_bound_to_the_verified_subject():
+    svc, auth, info = owned_account()
+    # Email can change; the binding is the verified subject, not a new mail value.
+    auth.user_map['other@example.org'] = auth.User('other@example.org', 'local', ('red', 'app'))
+    deny_post(svc, {**info, 'groups': [], 'email': 'other@example.org'})
     assert 'a@example.org' not in auth.user_map
+    assert auth.user_map['other@example.org'].password == 'local'
+
+
+@pytest.mark.parametrize('option', ['enabled', 'update_on_login'])
+def test_revocation_respects_each_provisioning_opt_out(option):
+    svc, auth, info = owned_account()
+    svc._saml_config['user_provisioning'][option] = False
+    deny_post(svc, {**info, 'groups': []})
+    assert 'a@example.org' in auth.user_map
+    assert guarded_response(svc, 'a@example.org').status == 403
+
+
+def test_revocation_cannot_target_an_unrelated_or_replaced_account():
+    svc, auth, info = owned_account()
+    deny_post(svc, {**info, 'groups': [], 'name_id': 'different-subject'})
+    assert 'a@example.org' in auth.user_map
+    replacement = auth.User('a@example.org', 'new-local-account', ('blue', 'app'))
+    auth.user_map['a@example.org'] = replacement
+    deny_post(svc, {**info, 'groups': []})
+    assert auth.user_map['a@example.org'] is replacement
+    assert not svc._group_role_accounts
+
+
+def test_denied_get_consumes_token_without_mutating_even_an_owned_account():
+    svc, auth, info = owned_account()
+    token = svc._store_pending_auth({**info, 'groups': []})
+    request = SimpleNamespace(method='GET', rel_url=SimpleNamespace(query={'token': token}))
+    assert asyncio.run(svc.saml_role_select_handler(request)).status == 403
+    assert svc._pop_pending_auth(token) is None
+    assert 'a@example.org' in auth.user_map
+
+
+def test_role_changes_retain_subject_binding_but_a_different_subject_is_denied():
+    svc, auth, info = owned_account()
+    assert asyncio.run(svc._apply_group_role({**info, 'groups': ['B']}, 'blue'))
+    assert not asyncio.run(svc._apply_group_role({**info, 'name_id': 'other'}, 'admin'))
+    deny_post(svc, {**info, 'groups': []})
+    assert 'a@example.org' not in auth.user_map
+
+
+def test_verified_no_access_acs_post_revokes_owned_session_before_a_picker_exists():
+    svc, auth, info = owned_account()
+    response = SimpleNamespace(get_identity=lambda: {'email': [info['email']]},
+                               get_subject=lambda: SimpleNamespace(text=info['name_id']))
+    svc._get_saml2_client = lambda: SimpleNamespace(parse_authn_request_response=lambda *args: response)
+    consumed = []
+    svc._claim_assertion = lambda assertion: (consumed.append(assertion) or True)
+    request = SimpleNamespace(method='POST', path='/saml',
+                              post=AsyncMock(return_value={'SAMLResponse': 'verified'}))
+    assert asyncio.run(svc._saml_login(request)).status == 403
+    assert consumed == [response]
+    assert 'a@example.org' not in auth.user_map
+    assert not svc._pending_auth
+
+
+def guarded_response(svc, username, path='/api/v2/operations'):
+    import sys
+    import types
+    from unittest.mock import patch
+    from aiohttp import web
+    security = types.ModuleType('aiohttp_security')
+    security.authorized_userid = AsyncMock(return_value=username)
+    handler = AsyncMock(return_value=web.Response(text='allowed'))
+    with patch.dict(sys.modules, {'aiohttp_security': security}):
+        result = asyncio.run(svc.guard_group_session(SimpleNamespace(path=path), handler))
+    assert handler.await_count == (0 if result.status == 403 else 1)
+    return result
+
+
+def test_failed_downgrade_blocks_old_sessions_without_changing_a_protected_account():
+    svc, auth, info = owned_account()
+    old = auth.user_map[info['email']]
+    svc._saml_config['user_provisioning']['update_on_login'] = False
+    assert not asyncio.run(svc._apply_group_role({**info, 'groups': ['P']}, 'report'))
+    assert auth.user_map[info['email']] is old
+    assert guarded_response(svc, info['email']).status == 403
+    assert guarded_response(svc, 'someone-else').status == 200
+    assert guarded_response(svc, info['email'], '/saml/login').status == 200
+    # Restored membership can recover without an account update.
+    assert asyncio.run(svc._apply_group_role(info, 'admin'))
+    assert auth.user_map[info['email']] is old
+    assert guarded_response(svc, info['email']).status == 200
+
+
+def test_preconfigured_account_can_have_saml_sessions_revoked_without_deletion():
+    svc, auth = service()
+    old = auth.User('a@example.org', 'manual', ('red', 'app'))
+    auth.user_map[old.username] = old
+    info = {'email': old.username, 'name_id': 'stable', 'groups': ['R']}
+    assert asyncio.run(svc._apply_group_role(info, 'red'))
+    svc._saml_config['user_provisioning']['update_on_login'] = False
+    assert not asyncio.run(svc._apply_group_role({**info, 'groups': ['P']}, 'report'))
+    assert auth.user_map[old.username] is old
+    assert guarded_response(svc, old.username).status == 403
+    deny_post(svc, {**info, 'groups': []})
+    assert auth.user_map[old.username] is old
+    assert guarded_response(svc, old.username).status == 403
+    # A new unrelated local entry is never subject to a stale denial.
+    auth.user_map[old.username] = auth.User(old.username, 'replacement', old.permissions)
+    assert guarded_response(svc, old.username).status == 200
+
+
+def test_unmapped_subject_cannot_revoke_an_unbound_local_account():
+    svc, auth = service()
+    old = auth.User('admin', 'break-glass', ('red', 'app'))
+    auth.user_map['admin'] = old
+    deny_post(svc, {'email': 'admin', 'name_id': 'foreign', 'groups': []})
+    assert auth.user_map['admin'] is old
+    assert guarded_response(svc, 'admin').status == 200
+
+
+def test_plugin_enable_registers_the_session_guard():
+    import ast
+    from pathlib import Path
+    from aiohttp import web
+    svc, _ = service()
+    svc.set_saml_login_handler = AsyncMock()
+    source = ast.parse((Path(__file__).parents[1] / 'hook.py').read_text())
+    enable = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'enable')
+    namespace = {'web': web, 'SamlService': lambda: svc}
+    exec(compile(ast.Module(body=[enable], type_ignores=[]), 'saml-hook', 'exec'), namespace)
+    async def check():
+        app = web.Application()
+        await namespace['enable']({'app_svc': SimpleNamespace(application=app)})
+        assert len(app.middlewares) == 1
+        handler = AsyncMock(return_value=web.Response(text='allowed'))
+        assert (await app.middlewares[0](SimpleNamespace(path='/api/v2/operations'), handler)).status == 200
+        svc.set_saml_login_handler.assert_awaited_once()
+    asyncio.run(check())
 
 
 def test_entra_group_claim_uri_works_without_an_attribute_override():
@@ -195,3 +351,24 @@ def test_saml_failure_raises_forbidden_so_core_never_uses_password_fallback():
                 pass
             else:
                 raise AssertionError('fail closed with an exception core explicitly propagates')
+
+
+def test_missing_saml_service_cannot_fall_back_to_passwords_without_environment_policy(monkeypatch):
+    from aiohttp import web
+    monkeypatch.delenv('CALDERA_SAML_RBAC_POLICY', raising=False)
+    auth = SimpleNamespace(default_login_handler=SimpleNamespace(handle_login=AsyncMock()))
+    handler = login_handler({'auth_svc': auth})
+    request = SimpleNamespace(post=AsyncMock(return_value={'username': 'red', 'password': 'old'}))
+    with pytest.raises(web.HTTPForbidden):
+        asyncio.run(handler.handle_login(request))
+    auth.default_login_handler.handle_login.assert_not_called()
+
+
+def test_group_login_error_redirect_is_denied_instead_of_looping():
+    from unittest.mock import patch
+    from aiohttp import web
+    saml = SimpleNamespace(saml_login_handler=AsyncMock(side_effect=web.HTTPFound('/login')))
+    handler = login_handler({'saml_svc': saml})
+    with patch.dict('os.environ', {'CALDERA_SAML_RBAC_POLICY': '{"enabled":true}'}):
+        with pytest.raises(web.HTTPForbidden):
+            asyncio.run(handler.handle_login_redirect(SimpleNamespace()))
