@@ -869,11 +869,16 @@ class SamlService(BaseService):
 
     def _remember_group_identity(self, info):
         identities = getattr(self, '_group_role_identities', {})
+        groups = tuple(sorted(set(info['groups'])))
+        previous = identities.get(info['email'])
+        if (self.current_group_identity(previous) and previous['name_id'] == info['name_id']
+                and previous['groups'] == groups):
+            return  # Another successful SSO with unchanged claims keeps live sessions.
         identities[info['email']] = MappingProxyType({
-            'subject': info['email'], 'name_id': info['name_id'], 'groups': tuple(info['groups'])})
+            'subject': info['email'], 'name_id': info['name_id'], 'groups': groups})
         self._group_role_identities = identities
         markers = getattr(self, '_group_role_session_markers', {})
-        markers[info['email']] = secrets.token_urlsafe(32)
+        markers[info['email']] = set()
         self._group_role_session_markers = markers
 
     def current_group_identity(self, identity):
@@ -899,30 +904,37 @@ class SamlService(BaseService):
         identity = getattr(self, '_group_role_identities', {}).get(username)
         if not self.current_group_identity(identity):
             return None
-        marker = getattr(self, '_group_role_session_markers', {}).get(username)
+        markers = getattr(self, '_group_role_session_markers', {}).get(username, set())
         session = await get_session(request)
         presented = session.get('saml_assertion_marker')
-        return identity if (isinstance(marker, str) and isinstance(presented, str)
+        return identity if (isinstance(presented, str)
                             and session.get('saml_assertion_subject') == username
-                            and secrets.compare_digest(marker, presented)) else None
+                            and presented in markers) else None
 
-    async def _bind_group_session(self, request, user_info):
+    async def _bind_group_session(self, request, user_info, identity):
         """Only a completed SAML login may attach the current assertion marker."""
         if self._group_role_policy() is None:
             return
         from aiohttp_session import get_session
         username = user_info.get('email')
-        identity = getattr(self, '_group_role_identities', {}).get(username)
-        marker = getattr(self, '_group_role_session_markers', {}).get(username)
-        if not self.current_group_identity(identity) or not isinstance(marker, str):
-            raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
         session = await get_session(request)
+        if not self.current_group_identity(identity):
+            raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
+        markers = self._group_role_session_markers[username]
+        if (session.get('saml_assertion_subject') == username
+                and isinstance(session.get('saml_assertion_marker'), str)):
+            markers.discard(session.get('saml_assertion_marker'))
+        marker = secrets.token_urlsafe(32)
+        markers.add(marker)
         session['saml_assertion_marker'] = marker
         session['saml_assertion_subject'] = username
 
     async def _apply_group_role(self, info, role):
         subject = info.get('name_id')
         if not isinstance(subject, str) or not subject.strip():
+            return False
+        if (not isinstance(info.get('groups'), (list, tuple))
+                or not all(isinstance(group, str) for group in info['groups'])):
             return False
         roles = self._group_roles(info)
         if not roles or role != roles[0]:
@@ -1684,10 +1696,12 @@ class SamlService(BaseService):
         # Use email as username (key in user_map), not role!
         username = email
 
+        identity = None
         if self._group_role_policy() is not None:
             identity = getattr(self, '_group_role_identities', {}).get(username)
             if (not self.current_group_identity(identity)
-                    or identity.get('name_id') != user_info.get('name_id')):
+                    or identity.get('name_id') != user_info.get('name_id')
+                    or identity.get('groups') != tuple(sorted(set(user_info.get('groups') or [])))):
                 raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
 
         if username in auth_svc.user_map:
@@ -1695,9 +1709,9 @@ class SamlService(BaseService):
             try:
                 await auth_svc.handle_successful_login(request, username)
             except web.HTTPFound as landing:
-                await self._bind_group_session(request, user_info)
+                await self._bind_group_session(request, user_info, identity)
                 raise self._chain_agentcore_identity(landing)
-            await self._bind_group_session(request, user_info)
+            await self._bind_group_session(request, user_info, identity)
         else:
             self.log.warning(f'User "{username}" not found in user_map. Role: "{caldera_role}", Display name: "{display_name}"')
             raise web.HTTPFound('/login')

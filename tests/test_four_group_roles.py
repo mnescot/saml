@@ -345,6 +345,33 @@ def test_unbindable_subject_cannot_change_accounts_or_create_core_sessions(name_
     auth.handle_successful_login.assert_not_awaited()
 
 
+def test_changed_claims_during_core_login_cannot_bind_a_different_assertion():
+    import sys
+    import types
+    from unittest.mock import patch
+    from aiohttp import web
+    svc, auth, info = owned_account()
+    session = {}
+    sessions = types.ModuleType('aiohttp_session')
+    sessions.get_session = AsyncMock(return_value=session)
+    async def core_login(request, username):
+        assert await svc._apply_group_role({**info, 'groups': ['A', 'P']}, 'admin')
+        raise web.HTTPFound('/')
+    auth.handle_successful_login = core_login
+    with patch.dict(sys.modules, {'aiohttp_session': sessions}), pytest.raises(web.HTTPForbidden):
+        asyncio.run(svc._authenticate_user(SimpleNamespace(), 'admin', info))
+    assert session == {}
+    assert svc._group_role_session_markers[info['email']] == set()
+
+
+@pytest.mark.parametrize('groups', [['A', {}], ['A', []], ['A', 1], 'A', None])
+def test_non_string_group_claims_cannot_enter_immutable_evidence(groups):
+    svc, auth = service()
+    assert not asyncio.run(svc._apply_group_role(
+        {'email': 'a@example.org', 'name_id': 'stable', 'groups': groups}, 'admin'))
+    assert auth.user_map == {}
+
+
 def guarded_response(svc, username, path='/api/v2/operations'):
     import sys
     import types

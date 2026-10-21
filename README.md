@@ -192,3 +192,7 @@ process-local assertion grants: the next HTML navigation redirects to
 `error=saml_reauthentication_required` and `login_url=/saml/login`. Complete SAML
 sign-in again to restore access; existing cookies cannot inherit another login's
 new privileges. Machine credentials retain their separately bounded permissions.
+Each completed browser login has its own marker. Concurrent SAML sessions remain
+valid when the subject and asserted groups are unchanged; entitlement/account
+changes invalidate prior grants before another picker completes. Unmarked
+legacy/password cookies also require SAML reauthentication in group-only mode.

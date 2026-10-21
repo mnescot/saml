@@ -96,8 +96,22 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             assert (await client.get('/test/group-evidence')).status == 401
             client.session.cookie_jar.clear()
             client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
-            # Fresh ACS evidence alone cannot upgrade any existing cookie.
+            # Another unchanged SSO has its own marker and keeps the first alive.
+            client.session.cookie_jar.clear()
             assert await svc._apply_group_role(info, 'admin')
+            assert (await client.get('/saml/test-login', allow_redirects=False)).status == 302
+            second_cookie = dict(client.session.cookie_jar.filter_cookies(client.make_url('/')))
+            assert second_cookie != current_cookie
+            for active_cookie in (current_cookie, second_cookie):
+                client.session.cookie_jar.clear()
+                client.session.cookie_jar.update_cookies({k: v.value for k, v in active_cookie.items()})
+                assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
+            # Changed claims invalidate both grants before a new picker completes.
+            assert await svc._apply_group_role({**info, 'groups': ['A', 'P']}, 'admin')
+            for active_cookie in (current_cookie, second_cookie):
+                client.session.cookie_jar.clear()
+                client.session.cookie_jar.update_cookies({k: v.value for k, v in active_cookie.items()})
+                assert (await client.get('/test/group-evidence')).status == 401
             for forged in ({'KEY': 'not-a-key'}, {'Authorization': 'Bearer not-a-token'}):
                 client.session.cookie_jar.clear()
                 client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
@@ -109,6 +123,7 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             expired = await client.get('/test/group-evidence')
             assert expired.status == 401
             assert await expired.json() == {'error': 'saml_reauthentication_required', 'login_url': '/saml/login'}
+            assert await svc._apply_group_role(info, 'admin')
             assert (await client.get('/saml/test-login', allow_redirects=False)).status == 302
             assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
             # An alternate header cannot convert this cookie into machine auth.
