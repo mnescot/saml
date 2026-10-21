@@ -685,10 +685,17 @@ class SamlService(BaseService):
                     # Extract user info from SAML attributes
                     user_info = self._extract_user_info_from_identity(identity, subject)
 
-                    if self._group_role_policy() is not None and not self._group_roles(user_info):
-                        # This POST has already consumed the validated assertion.
-                        self._revoke_owned_group_account(user_info)
-                        return self._no_access()
+                    if self._group_role_policy() is not None:
+                        roles = self._group_roles(user_info)
+                        if not roles:
+                            # This POST already consumed the validated assertion.
+                            self._revoke_owned_group_account(user_info)
+                            return self._no_access()
+                        # Effective permissions never depend on a picker label.
+                        # Reconcile now: an abandoned/forged picker submission
+                        # must not leave pre-existing higher privileges active.
+                        if not await self._apply_group_role(user_info, roles[0]):
+                            return web.Response(status=403, text='Sign-in could not complete. Contact your administrator.')
 
                     # Store pending auth and redirect to role selection page
                     token = self._store_pending_auth(user_info)

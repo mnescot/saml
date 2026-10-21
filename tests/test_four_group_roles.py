@@ -221,6 +221,34 @@ def test_verified_no_access_acs_post_revokes_owned_session_before_a_picker_exist
     assert not svc._pending_auth
 
 
+@pytest.mark.parametrize('updates', [True, False])
+def test_fresh_downgrade_reconciles_before_any_picker_submission(updates):
+    from aiohttp import web
+    svc, auth, info = owned_account()
+    svc._saml_config['user_provisioning']['update_on_login'] = updates
+    response = SimpleNamespace(
+        get_identity=lambda: {'email': [info['email']], 'groups': ['P']},
+        get_subject=lambda: SimpleNamespace(text=info['name_id']))
+    svc._get_saml2_client = lambda: SimpleNamespace(parse_authn_request_response=lambda *args: response)
+    svc._claim_assertion = lambda assertion: True
+    request = SimpleNamespace(method='POST', path='/saml/acs',
+                              post=AsyncMock(return_value={'SAMLResponse': 'verified'}))
+    if updates:
+        with pytest.raises(web.HTTPFound) as redirect:
+            asyncio.run(svc.saml_acs_handler(request))
+        assert redirect.value.location.startswith('/saml/role-select?token=')
+        assert auth.user_map[info['email']].permissions == ('app',)
+        # An invalid choice cannot undo the already-applied downgrade.
+        token = next(iter(svc._pending_auth))
+        invalid = SimpleNamespace(method='POST', post=AsyncMock(return_value={'token': token, 'role': 'admin'}))
+        assert asyncio.run(svc.saml_role_select_handler(invalid)).status == 403
+        assert auth.user_map[info['email']].permissions == ('app',)
+    else:
+        assert asyncio.run(svc.saml_acs_handler(request)).status == 403
+        assert not svc._pending_auth
+        assert guarded_response(svc, info['email']).status == 403
+
+
 def guarded_response(svc, username, path='/api/v2/operations'):
     import sys
     import types
