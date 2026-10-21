@@ -856,9 +856,7 @@ class SamlService(BaseService):
             if username:
                 from aiohttp_session import get_session
                 session = await get_session(request)
-                if (isinstance(session.get('saml_assertion_marker'), str)
-                        and session.get('saml_assertion_subject') == username
-                        and await self.verified_group_identity(request) is None):
+                if await self.verified_group_identity(request) is None:
                     # A cutover/restart deliberately expires process-local
                     # assertion grants. Reauthenticate instead of stranding a
                     # valid core cookie at the plugin's generic role denial.
