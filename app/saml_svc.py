@@ -702,6 +702,7 @@ class SamlService(BaseService):
                         # Reconcile now: an abandoned/forged picker submission
                         # must not leave pre-existing higher privileges active.
                         if not await self._apply_group_role(user_info, roles[0]):
+                            self._revoke_owned_group_account(user_info)
                             return web.Response(status=403, text='Sign-in could not complete. Contact your administrator.')
 
                     # Store pending auth and redirect to role selection page
@@ -811,6 +812,7 @@ class SamlService(BaseService):
             return self._no_access()
         # Choosing a label does not override the deployment's highest-role rule.
         if not await self._apply_group_role(info, effective):
+            self._revoke_owned_group_account(info)
             return web.Response(status=403, text='Sign-in could not complete. Contact your Caldera administrator.')
         return await self._authenticate_user(request, effective, info)
 
@@ -819,15 +821,13 @@ class SamlService(BaseService):
         if not isinstance(subject, str) or not subject:
             return
         auth = self.get_service('auth_svc')
-        if auth is None:
-            return
         bindings = getattr(self, '_group_role_accounts', {})
         for username, (bound_subject, owned_user, may_delete) in list(bindings.items()):
             if bound_subject != subject or username == except_username:
                 continue
             getattr(self, '_group_role_identities', {}).pop(username, None)
-            if auth.user_map.get(username) is owned_user:
-                if not may_delete or not self._may_write_user(user_exists=True):
+            if auth is None or auth.user_map.get(username) is owned_user:
+                if auth is None or not may_delete or not self._may_write_user(user_exists=True):
                     # Opt-outs prohibit account changes, not continued access
                     # using permissions a current assertion has revoked.
                     denials = getattr(self, '_group_role_denials', {})

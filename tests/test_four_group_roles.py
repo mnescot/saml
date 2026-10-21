@@ -254,6 +254,59 @@ def test_fresh_downgrade_reconciles_before_any_picker_submission(updates):
     assert svc._peek_pending_auth(peer_token)['name_id'] == 'peer'
 
 
+@pytest.mark.parametrize('entry', ['acs', 'picker'])
+@pytest.mark.parametrize('updates', [True, False])
+def test_missing_email_reconciliation_failure_retires_only_the_verified_subject(entry, updates):
+    svc, auth, info = owned_account()
+    old_evidence = svc._group_role_identities[info['email']]
+    peer = {'email': 'peer@example.org', 'name_id': 'peer-subject', 'groups': ['A']}
+    assert asyncio.run(svc._apply_group_role(peer, 'admin'))
+    peer_user = auth.user_map[peer['email']]
+    svc._saml_config['user_provisioning']['update_on_login'] = updates
+    incomplete = {**info, 'email': None, 'groups': ['P']}
+    if entry == 'acs':
+        response = SimpleNamespace(get_identity=lambda: {'groups': ['P']},
+                                   get_subject=lambda: SimpleNamespace(text=info['name_id']))
+        svc._get_saml2_client = lambda: SimpleNamespace(parse_authn_request_response=lambda *args: response)
+        svc._claim_assertion = lambda assertion: True
+        request = SimpleNamespace(method='POST', path='/saml/acs',
+                                  post=AsyncMock(return_value={'SAMLResponse': 'verified'}))
+        result = asyncio.run(svc.saml_acs_handler(request))
+    else:
+        token = svc._store_pending_auth(incomplete)
+        request = SimpleNamespace(method='POST', post=AsyncMock(return_value={'token': token, 'role': 'report'}))
+        result = asyncio.run(svc.saml_role_select_handler(request))
+    assert result.status == 403
+    assert not svc.current_group_identity(old_evidence)
+    if updates:
+        assert info['email'] not in auth.user_map
+    else:
+        assert guarded_response(svc, info['email']).status == 403
+    assert auth.user_map[peer['email']] is peer_user
+    assert guarded_response(svc, peer['email']).status == 200
+    # A complete assertion restores access when account updates are permitted.
+    svc._saml_config['user_provisioning']['update_on_login'] = True
+    assert asyncio.run(svc._apply_group_role({**info, 'groups': ['P']}, 'report'))
+    assert auth.user_map[info['email']].permissions == ('app',)
+    assert guarded_response(svc, info['email']).status == 200
+
+
+def test_revocation_during_auth_service_outage_blocks_bound_session_on_recovery():
+    svc, auth, info = owned_account()
+    old_user = auth.user_map[info['email']]
+    old_evidence = svc._group_role_identities[info['email']]
+    original_lookup = svc.get_service
+    svc.get_service = lambda name: None if name == 'auth_svc' else original_lookup(name)
+    svc._revoke_owned_group_account(info)
+    svc.get_service = original_lookup
+    assert auth.user_map[info['email']] is old_user
+    assert not svc.current_group_identity(old_evidence)
+    assert guarded_response(svc, info['email']).status == 403
+    assert guarded_response(svc, 'peer@example.org').status == 200
+    assert asyncio.run(svc._apply_group_role(info, 'admin'))
+    assert guarded_response(svc, info['email']).status == 200
+
+
 def guarded_response(svc, username, path='/api/v2/operations'):
     import sys
     import types
