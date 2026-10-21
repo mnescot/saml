@@ -93,12 +93,22 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
             # Fresh ACS evidence alone cannot upgrade any existing cookie.
             assert await svc._apply_group_role(info, 'admin')
+            for forged in ({'KEY': 'not-a-key'}, {'Authorization': 'Bearer not-a-token'}):
+                client.session.cookie_jar.clear()
+                client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
+                rejected = await client.get('/api/v2/operations', headers=forged)
+                assert rejected.status == 401
+                assert executed == [info['email']]
+            client.session.cookie_jar.clear()
+            client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
             expired = await client.get('/test/group-evidence')
             assert expired.status == 401
             assert await expired.json() == {'error': 'saml_reauthentication_required', 'login_url': '/saml/login'}
             assert (await client.get('/test/saml-login', allow_redirects=False)).status == 302
             assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
-            assert await (await client.get('/test/group-evidence', headers={'KEY': 'unused'})).json() == {'groups': []}
+            # An alternate header cannot convert this cookie into machine auth.
+            assert (await client.get('/test/group-evidence', headers={'KEY': 'unused'})).status == 401
+            assert (await client.get('/test/saml-login', allow_redirects=False)).status == 302
             old = auth.user_map[info['email']]
             svc._saml_config['user_provisioning']['update_on_login'] = False
             assert not await svc._apply_group_role({**info, 'groups': ['P']}, 'report')

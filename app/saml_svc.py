@@ -853,7 +853,7 @@ class SamlService(BaseService):
             auth = self.get_service('auth_svc')
             if username in denials and auth is not None and auth.user_map.get(username) is denials[username]:
                 return self._no_access()
-            if (username and not any(name.lower() in ('key', 'authorization') for name in request.headers)):
+            if username:
                 from aiohttp_session import get_session
                 session = await get_session(request)
                 if (isinstance(session.get('saml_assertion_marker'), str)
