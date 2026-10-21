@@ -923,6 +923,9 @@ class SamlService(BaseService):
         session['saml_assertion_subject'] = username
 
     async def _apply_group_role(self, info, role):
+        subject = info.get('name_id')
+        if not isinstance(subject, str) or not subject.strip():
+            return False
         roles = self._group_roles(info)
         if not roles or role != roles[0]:
             return False
@@ -939,7 +942,6 @@ class SamlService(BaseService):
                        'blue': ('blue', 'app'), 'report': ('app',)}[role]
         existing = auth.user_map.get(username)
         bindings = getattr(self, '_group_role_accounts', {})
-        subject = info.get('name_id')
         binding = bindings.get(username)
         owned = binding is not None and binding[1] is existing
         if owned and binding[0] != subject:
@@ -1683,6 +1685,12 @@ class SamlService(BaseService):
 
         # Use email as username (key in user_map), not role!
         username = email
+
+        if self._group_role_policy() is not None:
+            identity = getattr(self, '_group_role_identities', {}).get(username)
+            if (not self.current_group_identity(identity)
+                    or identity.get('name_id') != user_info.get('name_id')):
+                raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
 
         if username in auth_svc.user_map:
             self.log.info(f'User "{display_name}" ({username}) authenticated via SAML with role "{caldera_role}"')

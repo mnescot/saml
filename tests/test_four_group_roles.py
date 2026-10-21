@@ -56,7 +56,7 @@ def test_picker_offers_exact_roles_and_displays_highest_permission_rule():
 def test_report_core_permission_is_app_only_and_downgrades_old_red_account():
     svc, auth = service()
     auth.user_map['a@example.org'] = auth.User('a@example.org', 'preserved', ('red', 'app'))
-    info = {'email': 'a@example.org', 'groups': ['P']}
+    info = {'email': 'a@example.org', 'name_id': 'stable', 'groups': ['P']}
     assert asyncio.run(svc._apply_group_role(info, 'report'))
     assert auth.user_map['a@example.org'].permissions == ('app',)
     assert auth.user_map['a@example.org'].password == 'preserved'
@@ -65,7 +65,7 @@ def test_report_core_permission_is_app_only_and_downgrades_old_red_account():
 
 def test_lower_picker_choice_cannot_override_highest_group_role():
     svc, auth = service()
-    info = {'email': 'a@example.org', 'groups': ['P', 'A']}
+    info = {'email': 'a@example.org', 'name_id': 'stable', 'groups': ['P', 'A']}
     assert not asyncio.run(svc._apply_group_role(info, 'report'))
     assert asyncio.run(svc._apply_group_role(info, 'admin'))
     assert auth.user_map['a@example.org'].permissions == ('red', 'blue', 'app')
@@ -80,7 +80,7 @@ def test_provisioning_opt_out_still_prevents_creating_accounts():
 
 def test_posting_lower_owned_role_still_applies_highest_permissions_and_consumes_pending_auth():
     svc, auth = service()
-    info = {'email': 'a@example.org', 'groups': ['P', 'A']}
+    info = {'email': 'a@example.org', 'name_id': 'stable', 'groups': ['P', 'A']}
     popped = []
     svc._pop_pending_auth = lambda token: (popped.append(token) or info)
     seen = []
@@ -316,6 +316,33 @@ def test_failed_account_verification_never_publishes_unverified_permissions():
     # The ACS/picker failure cleanup can still identify and retire the old entry.
     svc._revoke_owned_group_account(info)
     assert info['email'] not in auth.user_map
+
+
+@pytest.mark.parametrize('name_id', [None, '', '   ', 42])
+@pytest.mark.parametrize('existing', [False, True])
+def test_unbindable_subject_cannot_change_accounts_or_create_core_sessions(name_id, existing):
+    from aiohttp import web
+    svc, auth = service()
+    email = 'a@example.org'
+    if existing:
+        auth.user_map[email] = auth.User(email, 'preserved', ('app',))
+    before = dict(auth.user_map)
+    info = {'email': email, 'name_id': name_id, 'groups': ['A']}
+    auth.handle_successful_login = AsyncMock()
+    assert not asyncio.run(svc._apply_group_role(info, 'admin'))
+    assert auth.user_map == before
+    response = SimpleNamespace(get_identity=lambda: {'email': [email], 'groups': ['A']},
+                               get_subject=lambda: SimpleNamespace(text=name_id))
+    svc._get_saml2_client = lambda: SimpleNamespace(parse_authn_request_response=lambda *args: response)
+    svc._claim_assertion = lambda assertion: True
+    request = SimpleNamespace(method='POST', path='/saml/acs',
+                              post=AsyncMock(return_value={'SAMLResponse': 'verified'}))
+    assert asyncio.run(svc.saml_acs_handler(request)).status == 403
+    assert auth.user_map == before
+    assert not svc._pending_auth
+    with pytest.raises(web.HTTPForbidden):
+        asyncio.run(svc._authenticate_user(request, 'admin', info))
+    auth.handle_successful_login.assert_not_awaited()
 
 
 def guarded_response(svc, username, path='/api/v2/operations'):
