@@ -47,6 +47,16 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             await security.remember(request, response, request.query['who'])
             return response
 
+        async def core_login(request, username):
+            response = web.HTTPFound('/')
+            await security.remember(request, response, username)
+            raise response
+
+        auth.handle_successful_login = core_login
+
+        async def saml_login(request):
+            return await svc._authenticate_user(request, 'admin', info)
+
         async def operation(request):
             who = await security.authorized_userid(request)
             if who is None:
@@ -57,14 +67,34 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
         async def group_evidence(request):
             identity = await svc.verified_group_identity(request)
             assert not svc.current_group_identity(dict(identity)) if identity else True
+            if identity:
+                with pytest.raises(TypeError):
+                    identity['groups'] = ('forged-admin',)
+                assert svc.current_group_identity(identity)
             return web.json_response({'groups': list(identity['groups']) if identity else []})
 
         app.router.add_get('/login', login)
+        app.router.add_get('/test/saml-login', saml_login)
         app.router.add_get('/api/v2/operations', operation)
         app.router.add_get('/test/group-evidence', group_evidence)
         async with TestClient(TestServer(app)) as client:
             assert (await client.get('/login', params={'who': info['email']})).status == 200
             assert (await client.get('/api/v2/operations')).status == 200
+            # A pre-existing same-account password cookie is not SAML evidence.
+            assert await (await client.get('/test/group-evidence')).json() == {'groups': []}
+            old_cookie = dict(client.session.cookie_jar.filter_cookies(client.make_url('/')))
+            assert (await client.get('/test/saml-login', allow_redirects=False)).status == 302
+            assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
+            current_cookie = dict(client.session.cookie_jar.filter_cookies(client.make_url('/')))
+            client.session.cookie_jar.clear()
+            client.session.cookie_jar.update_cookies({k: v.value for k, v in old_cookie.items()})
+            assert await (await client.get('/test/group-evidence')).json() == {'groups': []}
+            client.session.cookie_jar.clear()
+            client.session.cookie_jar.update_cookies({k: v.value for k, v in current_cookie.items()})
+            # Fresh ACS evidence alone cannot upgrade any existing cookie.
+            assert await svc._apply_group_role(info, 'admin')
+            assert await (await client.get('/test/group-evidence')).json() == {'groups': []}
+            assert (await client.get('/test/saml-login', allow_redirects=False)).status == 302
             assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
             assert await (await client.get('/test/group-evidence', headers={'KEY': 'unused'})).json() == {'groups': []}
             old = auth.user_map[info['email']]

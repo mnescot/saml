@@ -7,6 +7,8 @@ import base64
 import secrets
 import time
 import urllib.parse
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Dict, Any, Optional
 
 from aiohttp import web
@@ -826,6 +828,7 @@ class SamlService(BaseService):
             if bound_subject != subject or username == except_username:
                 continue
             getattr(self, '_group_role_identities', {}).pop(username, None)
+            getattr(self, '_group_role_session_markers', {}).pop(username, None)
             if auth is None or auth.user_map.get(username) is owned_user:
                 if auth is None or not may_delete or not self._may_write_user(user_exists=True):
                     # Opt-outs prohibit account changes, not continued access
@@ -854,13 +857,16 @@ class SamlService(BaseService):
 
     def _remember_group_identity(self, info):
         identities = getattr(self, '_group_role_identities', {})
-        identities[info['email']] = {'subject': info['email'], 'name_id': info['name_id'],
-                                    'groups': tuple(info['groups'])}
+        identities[info['email']] = MappingProxyType({
+            'subject': info['email'], 'name_id': info['name_id'], 'groups': tuple(info['groups'])})
         self._group_role_identities = identities
+        markers = getattr(self, '_group_role_session_markers', {})
+        markers[info['email']] = secrets.token_urlsafe(32)
+        self._group_role_session_markers = markers
 
     def current_group_identity(self, identity):
         """Revalidate an opaque in-process assertion record, never client data."""
-        if not isinstance(identity, dict) or self._group_role_policy() is None:
+        if not isinstance(identity, Mapping) or self._group_role_policy() is None:
             return False
         username = identity.get('subject')
         if getattr(self, '_group_role_identities', {}).get(username) is not identity:
@@ -876,9 +882,27 @@ class SamlService(BaseService):
         if any(name.lower() in ('key', 'authorization') for name in request.headers):
             return None
         from aiohttp_security import authorized_userid
+        from aiohttp_session import get_session
         username = await authorized_userid(request)
         identity = getattr(self, '_group_role_identities', {}).get(username)
-        return identity if self.current_group_identity(identity) else None
+        if not self.current_group_identity(identity):
+            return None
+        marker = getattr(self, '_group_role_session_markers', {}).get(username)
+        presented = (await get_session(request)).get('saml_assertion_marker')
+        return identity if (isinstance(marker, str) and isinstance(presented, str)
+                            and secrets.compare_digest(marker, presented)) else None
+
+    async def _bind_group_session(self, request, user_info):
+        """Only a completed SAML login may attach the current assertion marker."""
+        if self._group_role_policy() is None:
+            return
+        from aiohttp_session import get_session
+        username = user_info.get('email')
+        identity = getattr(self, '_group_role_identities', {}).get(username)
+        marker = getattr(self, '_group_role_session_markers', {}).get(username)
+        if not self.current_group_identity(identity) or not isinstance(marker, str):
+            raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
+        (await get_session(request))['saml_assertion_marker'] = marker
 
     async def _apply_group_role(self, info, role):
         roles = self._group_roles(info)
@@ -1647,7 +1671,9 @@ class SamlService(BaseService):
             try:
                 await auth_svc.handle_successful_login(request, username)
             except web.HTTPFound as landing:
+                await self._bind_group_session(request, user_info)
                 raise self._chain_agentcore_identity(landing)
+            await self._bind_group_session(request, user_info)
         else:
             self.log.warning(f'User "{username}" not found in user_map. Role: "{caldera_role}", Display name: "{display_name}"')
             raise web.HTTPFound('/login')
