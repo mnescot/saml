@@ -164,6 +164,7 @@ class SamlService(BaseService):
         # object. Only entries created here may be deleted on revocation.
         self._group_role_accounts = {}
         self._group_role_denials = {}
+        self._group_role_identities = {}
 
         # One-time-use record for consumed assertions, keyed by assertion ID and
         # held until that assertion's own NotOnOrAfter. See _claim_assertion.
@@ -824,6 +825,7 @@ class SamlService(BaseService):
         for username, (bound_subject, owned_user, may_delete) in list(bindings.items()):
             if bound_subject != subject or username == except_username:
                 continue
+            getattr(self, '_group_role_identities', {}).pop(username, None)
             if auth.user_map.get(username) is owned_user:
                 if not may_delete or not self._may_write_user(user_exists=True):
                     # Opt-outs prohibit account changes, not continued access
@@ -849,6 +851,34 @@ class SamlService(BaseService):
             if username in denials and auth is not None and auth.user_map.get(username) is denials[username]:
                 return self._no_access()
         return await handler(request)
+
+    def _remember_group_identity(self, info):
+        identities = getattr(self, '_group_role_identities', {})
+        identities[info['email']] = {'subject': info['email'], 'name_id': info['name_id'],
+                                    'groups': tuple(info['groups'])}
+        self._group_role_identities = identities
+
+    def current_group_identity(self, identity):
+        """Revalidate an opaque in-process assertion record, never client data."""
+        if not isinstance(identity, dict) or self._group_role_policy() is None:
+            return False
+        username = identity.get('subject')
+        if getattr(self, '_group_role_identities', {}).get(username) is not identity:
+            return False
+        auth = self.get_service('auth_svc')
+        binding = getattr(self, '_group_role_accounts', {}).get(username)
+        return bool(auth is not None and binding and binding[0] == identity.get('name_id')
+                    and auth.user_map.get(username) is binding[1]
+                    and getattr(self, '_group_role_denials', {}).get(username) is not binding[1])
+
+    async def verified_group_identity(self, request):
+        """Verified direct-SAML evidence for other plugins when Cognito is off."""
+        if any(name.lower() in ('key', 'authorization') for name in request.headers):
+            return None
+        from aiohttp_security import authorized_userid
+        username = await authorized_userid(request)
+        identity = getattr(self, '_group_role_identities', {}).get(username)
+        return identity if self.current_group_identity(identity) else None
 
     async def _apply_group_role(self, info, role):
         roles = self._group_roles(info)
@@ -880,6 +910,8 @@ class SamlService(BaseService):
                 self._group_role_accounts = bindings
             if owned:
                 getattr(self, '_group_role_denials', {}).pop(username, None)
+            if isinstance(subject, str) and subject:
+                self._remember_group_identity(info)
             return True
         if not self._may_write_user(user_exists=existing is not None):
             self._revoke_owned_group_account(info)
@@ -897,6 +929,7 @@ class SamlService(BaseService):
                 bindings[username] = (subject, updated, existing is None or bool(owned and binding[2]))
                 self._group_role_accounts = bindings
                 getattr(self, '_group_role_denials', {}).pop(username, None)
+                self._remember_group_identity(info)
             return True
         except Exception:
             self.log.error('Could not apply SAML group role for %r', username)

@@ -159,6 +159,15 @@ group policy for its UI, API and tools. The deployment must configure both.
 
 Existing account-creation/update opt-outs still apply. If the exact permissions
 cannot be applied, sign-in is refused rather than retaining an older role.
+
+Other server-side plugins may call `verified_group_identity(request)` when they
+need direct SAML roles without optional Cognito web identity. It authenticates
+the core cookie session and returns only a live, server-owned assertion record,
+bound to that account and NameID. `current_group_identity(record)` revalidates
+it after changes; copied records, revoked/replaced accounts and machine
+credentials cannot supply this evidence. The record contains no password or
+account credential object.
+
 Successful group-mode sessions are bound to their verified NameID and exact
 core account entry. If a later assertion removes membership or cannot apply a
 role change, old sessions are denied independently of account provisioning.

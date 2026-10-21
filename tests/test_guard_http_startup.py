@@ -54,19 +54,29 @@ def test_guard_runs_inside_session_storage_and_preserves_unrelated_requests():
             executed.append(who)
             return web.Response(text=who)
 
+        async def group_evidence(request):
+            identity = await svc.verified_group_identity(request)
+            assert not svc.current_group_identity(dict(identity)) if identity else True
+            return web.json_response({'groups': list(identity['groups']) if identity else []})
+
         app.router.add_get('/login', login)
         app.router.add_get('/api/v2/operations', operation)
+        app.router.add_get('/test/group-evidence', group_evidence)
         async with TestClient(TestServer(app)) as client:
             assert (await client.get('/login', params={'who': info['email']})).status == 200
             assert (await client.get('/api/v2/operations')).status == 200
+            assert await (await client.get('/test/group-evidence')).json() == {'groups': ['A']}
+            assert await (await client.get('/test/group-evidence', headers={'KEY': 'unused'})).json() == {'groups': []}
             old = auth.user_map[info['email']]
             svc._saml_config['user_provisioning']['update_on_login'] = False
             assert not await svc._apply_group_role({**info, 'groups': ['P']}, 'report')
             assert auth.user_map[info['email']] is old
             assert (await client.get('/api/v2/operations')).status == 403
+            assert (await client.get('/test/group-evidence')).status == 403
             assert executed == [info['email']]
             assert (await client.get('/login', params={'who': peer})).status == 200
             assert (await client.get('/api/v2/operations')).status == 200
+            assert await (await client.get('/test/group-evidence')).json() == {'groups': []}
             client.session.cookie_jar.clear()
             assert (await client.get('/api/v2/operations')).status == 401
             assert await svc._apply_group_role(info, 'admin')
