@@ -169,8 +169,14 @@ Existing account-creation/update opt-outs still apply. If the exact permissions
 cannot be applied, sign-in is refused rather than retaining an older role.
 
 Other server-side plugins may call `verified_group_identity(request)` when they
-need verified SAML groups and the `selected_role`, including alongside Cognito. It authenticates
-the core cookie session and returns only a live, server-owned assertion record,
+need verified SAML groups and the `selected_role` on cookie-authenticated browser
+requests, including deployments that also use Cognito. It does not validate a
+Cognito JWT or accept requests carrying `KEY`/`Authorization` headers. A companion
+must verify its alternate credentials and bind them to the originating browser's
+live grant through its own credential/session mapping; it must never inherit a
+role from an ambient cookie on a bearer request. The Caldera UI uses its core
+cookie while delegated Cognito credentials are held and verified server-side.
+This API authenticates the core cookie session and returns a live, server-owned assertion record,
 bound to that account and NameID. `current_group_identity(record)` revalidates
 it after changes; copied records, revoked/replaced accounts and machine
 credentials cannot supply this evidence. The record contains no password or

@@ -161,3 +161,12 @@ def test_group_mode_requires_the_core_permission_checker_at_startup():
     app[api.AUTZ_KEY] = SimpleNamespace()
     with pytest.raises(RuntimeError, match='AuthService.check_permissions'):
         svc.install_session_permissions(app)
+
+
+@pytest.mark.parametrize('header', ['Authorization', 'KEY'])
+def test_alternate_credentials_cannot_inherit_an_ambient_browser_role(header):
+    svc, _ = service()
+    svc._session_group_identity = AsyncMock()
+    request = SimpleNamespace(headers={header: 'unverified credential'}, cookies={'API_SESSION': 'ambient'})
+    assert asyncio.run(svc.verified_group_identity(request)) is None
+    svc._session_group_identity.assert_not_called()

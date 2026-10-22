@@ -1550,7 +1550,7 @@ class SamlService(BaseService):
                 and identity.get('selected_role') in self._group_roles({'groups': list(canonical['groups'])}))
 
     async def verified_group_identity(self, request):
-        """Verified SAML groups and selected role bound to this browser login."""
+        """Cookie-only SAML groups/role; alternate credentials need their own verifier."""
         if any(name.lower() in ('key', 'authorization') for name in request.headers):
             return None
         return await self._session_group_identity(request)
