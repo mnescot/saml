@@ -53,6 +53,7 @@ def test_picker_offers_exact_roles_and_displays_highest_permission_rule():
     assert '&lt;test&gt;' in result.text and 'highest role' in result.text
     assert 'brand-mark' in result.text and 'effective-banner' in result.text
     assert 'role-badge effective' in result.text and 'a@example.org' in result.text
+    assert '--fh-gold-dark: #8a5a00;' in result.text and '--fh-teal-dark: #006d82;' in result.text
 
 
 def test_report_core_permission_is_app_only_and_downgrades_old_red_account():

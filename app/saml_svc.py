@@ -50,9 +50,9 @@ _ROLE_PAGE_CSS = """
     --fh-navy: #1b365d;
     --fh-ink: #10233f;
     --fh-teal: #00abc8;
-    --fh-teal-dark: #00869e;
+    --fh-teal-dark: #006d82;
     --fh-gold: #ffb500;
-    --fh-gold-dark: #b77900;
+    --fh-gold-dark: #8a5a00;
     --fh-purple: #aa4ac4;
     --fh-purple-dark: #7e2e96;
     --fh-crimson: #d63649;
@@ -62,7 +62,7 @@ _ROLE_PAGE_CSS = """
     --fh-surface-muted: #f4f7f9;
     --fh-border: #d7dee4;
     --fh-text: #10233f;
-    --fh-muted: #53657d;
+    --fh-muted: #47586d;
     --fh-serif: Georgia, 'Times New Roman', serif;
     --fh-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     --fh-mono: 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, monospace;
@@ -360,7 +360,7 @@ _ROLE_PAGE_CSS = """
     line-height: 1.2;
   }
   .role-kicker {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 700;
     color: var(--role-accent-ink, var(--fh-teal-dark));
     letter-spacing: 0.02em;
