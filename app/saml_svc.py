@@ -1413,16 +1413,19 @@ class SamlService(BaseService):
             auth.check_permissions = check_permissions
         if callable(original_permissions):
             async def get_permissions(request):
-                permissions = await original_permissions(request)
                 grant = scope.get()
                 if grant is None:
-                    return permissions
-                record = grant[1]
+                    return await original_permissions(request)
+                username, record = grant
                 if not service.current_group_identity(record):
                     return ()
                 allowed = service._role_permissions(record['selected_role'])
-                narrowed = [p for p in permissions if str(getattr(p, 'name', p)).lower() in allowed]
-                return narrowed if isinstance(permissions, list) else tuple(narrowed)
+                # Enumerate the verified browser's account, not an alternate
+                # key's grants. Both core APIs must describe the same session.
+                user = auth.user_map.get(username)
+                return [auth.Access[str(getattr(p, 'name', p)).upper()]
+                        for p in getattr(user, 'permissions', ())
+                        if str(getattr(p, 'name', p)).lower() in allowed]
             auth.get_permissions = get_permissions
 
     @staticmethod

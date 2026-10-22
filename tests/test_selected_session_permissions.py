@@ -42,6 +42,7 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
         return [Access[p.upper()] for p in auth.user_map[who].permissions]
 
     auth.get_permissions = native_permissions
+    auth.Access = Access
     auth.request_has_valid_api_key = lambda request: request.headers.get('KEY') in ('test-red-key', 'test-blue-key')
 
     async def exercise():
@@ -108,6 +109,10 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
             await asyncio.gather(*(check(role) for role in cookies for _ in range(3)))
             for role in cookies:
                 for key in (None, 'test-red-key', 'test-blue-key'):
+                    client.session.cookie_jar.clear()
+                    response = await client.get('/machine-permissions', cookies=cookies[role],
+                                                headers={'KEY': key} if key else {})
+                    assert await response.json() == list(svc._role_permissions(role))
                     for permission in ('red', 'blue', 'app'):
                         client.session.cookie_jar.clear()
                         before = len(executed)
