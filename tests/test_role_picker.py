@@ -90,6 +90,25 @@ class _AuthSvc:
         user = self.user_map.get(username)
         return list(user.permissions) if user else []
 
+    def request_has_valid_api_key(self, request):
+        return False
+
+    async def login_redirect(self, request, *, use_template=False):
+        from aiohttp import web
+        return web.HTTPUnauthorized()
+
+    async def check_permissions(self, group, request):
+        # AuthService.check_permissions from the deployed Caldera 3735d9eb
+        # core: notably, the API-key shortcut precedes check_permission.
+        from aiohttp_security import check_permission
+        from aiohttp.web import HTTPUnauthorized, HTTPForbidden
+        try:
+            if self.request_has_valid_api_key(request):
+                return True
+            await check_permission(request, group)
+        except (HTTPUnauthorized, HTTPForbidden):
+            return await self.login_redirect(request, use_template=False)
+
 
 def _service(mapping=None, auth_svc=None, log=None):
     """A SamlService without running __init__, which needs real config."""

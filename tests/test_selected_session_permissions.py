@@ -10,6 +10,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 import aiohttp_security as security
 import aiohttp_session as session
+import pytest
 from aiohttp_security.abc import AbstractAuthorizationPolicy
 
 from test_four_group_roles import service
@@ -76,9 +77,16 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
         async def machine_permissions(request):
             return web.json_response([p.value for p in await auth.get_permissions(request)])
 
+        async def core_check(request):
+            denied = await auth.check_permissions(request.match_info['permission'], request)
+            if isinstance(denied, web.StreamResponse):
+                return denied
+            return web.Response(text='allowed')
+
         app.router.add_get('/saml/select', select)
         app.router.add_get('/who', who)
         app.router.add_get('/machine-permissions', machine_permissions)
+        app.router.add_get('/core-check/{permission}', core_check)
         async with TestClient(TestServer(app)) as client:
             cookies = {}
             for role in ('admin', 'red', 'blue', 'report'):
@@ -96,6 +104,13 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
                 assert payload['checked'] == expected
                 assert payload['enumerated'] == expected
             await asyncio.gather(*(check(role) for role in cookies for _ in range(3)))
+            for role in cookies:
+                for key in (None, 'test-red-key', 'test-blue-key'):
+                    for permission in ('red', 'blue', 'app'):
+                        client.session.cookie_jar.clear()
+                        response = await client.get('/core-check/' + permission, cookies=cookies[role],
+                            headers={'KEY': key} if key else {})
+                        assert response.status == (200 if permission in svc._role_permissions(role) else 403)
             assert auth.user_map[info['email']].permissions == ('red', 'blue', 'app')
             # Switching this browser to Red retires its old Admin grant while
             # other browsers retain their own independently selected roles.
@@ -111,6 +126,11 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
                 client.session.cookie_jar.clear()
                 response = await client.get('/machine-permissions', headers={'KEY': 'test-' + native + '-key'})
                 assert await response.json() == [native, 'app']
+                for permission in ('red', 'blue', 'app'):
+                    # Key-only requests retain core's existing grants.
+                    response = await client.get('/core-check/' + permission,
+                                                headers={'KEY': 'test-' + native + '-key'})
+                    assert response.status == 200
                 # A browser carrying a machine key still cannot escape its
                 # selected role through core's account-based enumerator.
                 response = await client.get('/machine-permissions', cookies=cookies['red'],
@@ -122,3 +142,13 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
                 assert (await client.get('/who', cookies=cookie)).status == 401
 
     asyncio.run(exercise())
+
+
+def test_group_mode_requires_the_core_permission_checker_at_startup():
+    svc, auth = service()
+    auth.check_permissions = None
+    app = web.Application()
+    from aiohttp_security import api
+    app[api.AUTZ_KEY] = SimpleNamespace()
+    with pytest.raises(RuntimeError, match='AuthService.check_permissions'):
+        svc.install_session_permissions(app)

@@ -160,7 +160,10 @@ group policy and selected session role for its UI, API and tools. The deployment
 must configure both. The hierarchy orders available choices and supplies the
 account's membership ceiling; selecting a lower role does not activate it.
 Concurrent browser sessions keep independent role limits. Core permission
-checks and `AuthService.get_permissions(request)` both enforce that limit.
+checks, `AuthService.check_permissions(group, request)` and
+`AuthService.get_permissions(request)` enforce that limit. A browser carrying
+an API key still uses its selected session role; key-only requests retain the
+core's native credential behavior.
 
 Existing account-creation/update opt-outs still apply. If the exact permissions
 cannot be applied, sign-in is refused rather than retaining an older role.

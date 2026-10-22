@@ -1394,8 +1394,24 @@ class SamlService(BaseService):
         application[api.AUTZ_KEY] = SelectedSessionPolicy()
         auth = self.get_service('auth_svc')
         original_permissions = getattr(auth, 'get_permissions', None)
+        original_check = getattr(auth, 'check_permissions', None)
         if self._group_role_policy() is not None and not callable(original_permissions):
             raise RuntimeError('SAML selected-role enforcement requires AuthService.get_permissions')
+        if self._group_role_policy() is not None and not callable(original_check):
+            raise RuntimeError('SAML selected-role enforcement requires AuthService.check_permissions')
+        if callable(original_check):
+            async def check_permissions(group, request):
+                if scope.get() is None:
+                    return await original_check(group, request)
+                # Core accepts a valid KEY before consulting its authorization
+                # policy. A browser's selected role must be checked first,
+                # including requests carrying both session and key credentials.
+                from aiohttp_security import check_permission
+                try:
+                    await check_permission(request, group)
+                except (web.HTTPUnauthorized, web.HTTPForbidden):
+                    return service._no_access()
+            auth.check_permissions = check_permissions
         if callable(original_permissions):
             async def get_permissions(request):
                 permissions = await original_permissions(request)
