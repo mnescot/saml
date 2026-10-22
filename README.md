@@ -151,18 +151,32 @@ precedence when the deployment uses a custom claim name.
 Only group membership in the validated SAML assertion grants these roles.
 Role attributes, email domains and the legacy default role do not grant access
 in this mode. The picker offers exactly the user's memberships; no match shows
-**No access**. Effective permissions always follow **Admin > Red > Blue > Report**,
-regardless of which owned label the user selects. Admin receives core Red/Blue
+**No access**. The selected role determines that browser session's permissions.
+An Admin-group member choosing Red receives a Red session; Admin permissions
+require selecting Admin in a new verified sign-in. Admin receives core Red/Blue
 permissions; Red and Blue keep their corresponding core permissions; Report
 receives application access only. InfoSec Agent separately enforces the same
-group policy for its UI, API and tools. The deployment must configure both.
+group policy and selected session role for its UI, API and tools. The deployment
+must configure both. The hierarchy orders available choices and supplies the
+account's membership ceiling; selecting a lower role does not activate it.
+Concurrent browser sessions keep independent role limits. Core permission
+checks, `AuthService.check_permissions(group, request)` and
+`AuthService.get_permissions(request)` enforce that limit. A browser carrying
+an API key still uses its selected session role; key-only requests retain the
+core's native credential behavior.
 
 Existing account-creation/update opt-outs still apply. If the exact permissions
 cannot be applied, sign-in is refused rather than retaining an older role.
 
 Other server-side plugins may call `verified_group_identity(request)` when they
-need direct SAML roles without optional Cognito web identity. It authenticates
-the core cookie session and returns only a live, server-owned assertion record,
+need verified SAML groups and the `selected_role` on cookie-authenticated browser
+requests, including deployments that also use Cognito. It does not validate a
+Cognito JWT or accept requests carrying `KEY`/`Authorization` headers. A companion
+must verify its alternate credentials and bind them to the originating browser's
+live grant through its own credential/session mapping; it must never inherit a
+role from an ambient cookie on a bearer request. The Caldera UI uses its core
+cookie while delegated Cognito credentials are held and verified server-side.
+This API authenticates the core cookie session and returns a live, server-owned assertion record,
 bound to that account and NameID. `current_group_identity(record)` revalidates
 it after changes; copied records, revoked/replaced accounts and machine
 credentials cannot supply this evidence. The record contains no password or

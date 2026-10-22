@@ -1136,9 +1136,9 @@ class SamlService(BaseService):
                             # This POST already consumed the validated assertion.
                             self._revoke_owned_group_account(user_info)
                             return self._no_access()
-                        # Effective permissions never depend on a picker label.
-                        # Reconcile now: an abandoned/forged picker submission
-                        # must not leave pre-existing higher privileges active.
+                        # Reconcile the account's membership ceiling now. An
+                        # abandoned picker must not retain revoked permissions;
+                        # the completed browser login gets its own selected role.
                         if not await self._apply_group_role(user_info, roles[0]):
                             self._revoke_owned_group_account(user_info)
                             return web.Response(status=403, text='Sign-in could not complete. Contact your administrator.')
@@ -1242,7 +1242,7 @@ class SamlService(BaseService):
         is_effective = role == effective
         btn_cls = 'role-btn ' + role + (' is-effective' if is_effective else '')
         badge = (
-            '<span class="role-badge effective">Effective Role</span>'
+            '<span class="role-badge effective">Highest available</span>'
             if is_effective
             else '<span class="role-badge">SAML Granted</span>'
         )
@@ -1316,8 +1316,8 @@ class SamlService(BaseService):
                     '</div><div class="card-body">'
                     '<div class="effective-banner">' + shield_svg
                     + '<p>Only roles granted by your SAML groups are shown. '
-                    'Your effective permissions are those of your highest role: <strong>'
-                    + effective.title() + '</strong>.</p></div>'
+                    'Your session will use only the role you select. '
+                    'Selecting Red or Blue does not activate Admin permissions.</p></div>'
                     '<form method="post" action="/saml/role-select">'
                     '<input type="hidden" name="token" value="' + self._html_escape(token) + '">'
                     '<div class="role-grid">' + buttons + '</div>'
@@ -1327,13 +1327,13 @@ class SamlService(BaseService):
                     '</div></body></html>'
                 ),
             )
-        if post.get('role', '').lower() not in roles:
+        selected = post.get('role', '').lower()
+        if selected not in roles:
             return self._no_access()
-        # Choosing a label does not override the deployment's highest-role rule.
-        if not await self._apply_group_role(info, effective):
+        if not await self._apply_group_role(info, selected):
             self._revoke_owned_group_account(info)
             return web.Response(status=403, text='Sign-in could not complete. Contact your Caldera administrator.')
-        return await self._authenticate_user(request, effective, info)
+        return await self._authenticate_user(request, selected, info)
 
     def _revoke_owned_group_account(self, info, *, except_username=None):
         subject = info.get('name_id')
@@ -1358,7 +1358,91 @@ class SamlService(BaseService):
             bindings.pop(username, None)
             getattr(self, '_group_role_denials', {}).pop(username, None)
 
+    def install_session_permissions(self, application):
+        """Bound core permission checks to the current browser's selected role.
+
+        Core keeps one account per subject. Its account is the membership
+        ceiling; independent browser logins must not rewrite each other's role.
+        Both permission-check APIs are narrowed using a request-local context.
+        Native machine credentials retain their existing authentication path.
+        """
+        import contextvars
+        from aiohttp_security import api
+        from aiohttp_security.abc import AbstractAuthorizationPolicy
+
+        original = application.get(api.AUTZ_KEY)
+        if original is None:
+            raise RuntimeError('SAML selected-role enforcement requires core authorization')
+        scope = contextvars.ContextVar('saml_selected_session', default=None)
+        self._session_permission_scope = scope
+        service = self
+
+        class SelectedSessionPolicy(AbstractAuthorizationPolicy):
+            async def authorized_userid(self, identity):
+                return await original.authorized_userid(identity)
+
+            async def permits(self, identity, permission, context=None):
+                if not await original.permits(identity, permission, context):
+                    return False
+                grant = scope.get()
+                if grant is None:
+                    return True
+                username, record = grant
+                return (identity == username and service.current_group_identity(record)
+                        and permission in service._role_permissions(record['selected_role']))
+
+        application[api.AUTZ_KEY] = SelectedSessionPolicy()
+        auth = self.get_service('auth_svc')
+        original_permissions = getattr(auth, 'get_permissions', None)
+        original_check = getattr(auth, 'check_permissions', None)
+        if self._group_role_policy() is not None and not callable(original_permissions):
+            raise RuntimeError('SAML selected-role enforcement requires AuthService.get_permissions')
+        if self._group_role_policy() is not None and not callable(original_check):
+            raise RuntimeError('SAML selected-role enforcement requires AuthService.check_permissions')
+        if callable(original_check):
+            async def check_permissions(group, request):
+                if scope.get() is None:
+                    return await original_check(group, request)
+                # Core accepts a valid KEY before consulting its authorization
+                # policy. A browser's selected role must be checked first,
+                # including requests carrying both session and key credentials.
+                from aiohttp_security import check_permission
+                # Core's decorator ignores a returned response. Propagate the
+                # HTTP denial so the protected handler cannot execute.
+                await check_permission(request, group)
+            auth.check_permissions = check_permissions
+        if callable(original_permissions):
+            async def get_permissions(request):
+                grant = scope.get()
+                if grant is None:
+                    return await original_permissions(request)
+                username, record = grant
+                if not service.current_group_identity(record):
+                    return ()
+                allowed = service._role_permissions(record['selected_role'])
+                # Enumerate the verified browser's account, not an alternate
+                # key's grants. Both core APIs must describe the same session.
+                user = auth.user_map.get(username)
+                return [auth.Access[str(getattr(p, 'name', p)).upper()]
+                        for p in getattr(user, 'permissions', ())
+                        if str(getattr(p, 'name', p)).lower() in allowed]
+            auth.get_permissions = get_permissions
+
+    @staticmethod
+    def _role_permissions(role):
+        return {'admin': ('red', 'blue', 'app'), 'red': ('red', 'app'),
+                'blue': ('blue', 'app'), 'report': ('app',)}.get(role, ())
+
     async def guard_group_session(self, request, handler):
+        scope = getattr(self, '_session_permission_scope', None)
+        reset = scope.set(None) if scope is not None else None
+        try:
+            return await self._guard_group_session(request, handler)
+        finally:
+            if scope is not None:
+                scope.reset(reset)
+
+    async def _guard_group_session(self, request, handler):
         """Reject stale core sessions without rewriting unmanaged accounts."""
         denials = getattr(self, '_group_role_denials', {})
         if self._group_role_policy() is not None and request.path == '/logout':
@@ -1382,7 +1466,8 @@ class SamlService(BaseService):
             if username:
                 from aiohttp_session import get_session
                 session = await get_session(request)
-                if await self._session_group_identity(request) is None:
+                record = await self._session_group_identity(request)
+                if record is None:
                     # A cutover/restart deliberately expires process-local
                     # assertion grants. Reauthenticate instead of stranding a
                     # valid core cookie at the plugin's generic role denial.
@@ -1391,6 +1476,9 @@ class SamlService(BaseService):
                         return web.HTTPFound('/saml/login')
                     return web.json_response({'error': 'saml_reauthentication_required',
                                               'login_url': '/saml/login'}, status=401)
+                scope = getattr(self, '_session_permission_scope', None)
+                if scope is not None:
+                    scope.set((username, record))
         return await handler(request)
 
     def _remember_group_identity(self, info):
@@ -1458,10 +1546,11 @@ class SamlService(BaseService):
                 markers.pop(marker, None)
         return (any(grant is identity for grant in markers.values())
                 and identity.get('name_id') == canonical['name_id']
-                and identity.get('groups') == canonical['groups'])
+                and identity.get('groups') == canonical['groups']
+                and identity.get('selected_role') in self._group_roles({'groups': list(canonical['groups'])}))
 
     async def verified_group_identity(self, request):
-        """Verified direct-SAML evidence for other plugins when Cognito is off."""
+        """Cookie-only SAML groups/role; alternate credentials need their own verifier."""
         if any(name.lower() in ('key', 'authorization') for name in request.headers):
             return None
         return await self._session_group_identity(request)
@@ -1486,6 +1575,7 @@ class SamlService(BaseService):
         username = user_info.get('email')
         session = await get_session(request)
         if (not self._current_group_account(identity)
+                or user_info.get('selected_role') not in self._group_roles(user_info)
                 or not self._live_group_expiry(user_info.get('authn_expires_at'))):
             raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
         markers = self._group_role_session_markers[username]
@@ -1498,7 +1588,8 @@ class SamlService(BaseService):
         marker = secrets.token_urlsafe(32)
         while len(markers) >= self._MAX_GROUP_SESSIONS:
             markers.pop(next(iter(markers)))
-        markers[marker] = MappingProxyType({**identity, 'expires_at': user_info['authn_expires_at']})
+        markers[marker] = MappingProxyType({**identity,
+            'selected_role': user_info['selected_role'], 'expires_at': user_info['authn_expires_at']})
         session['saml_assertion_marker'] = marker
         session['saml_assertion_subject'] = username
 
@@ -1514,8 +1605,9 @@ class SamlService(BaseService):
             return False
         info['authn_expires_at'] = min(info['authn_expires_at'], time.time() + self._GROUP_SESSION_TTL)
         roles = self._group_roles(info)
-        if not roles or role != roles[0]:
+        if role not in roles:
             return False
+        info['selected_role'] = role
         auth = self.get_service('auth_svc')
         username = info.get('email')
         if not auth or not username:
@@ -1525,8 +1617,8 @@ class SamlService(BaseService):
         self._revoke_owned_group_account(info, except_username=username)
         # Core Caldera only understands APP, RED and BLUE. Keep the application
         # roles separate: never place ADMIN/REPORT in Access enum permissions.
-        permissions = {'admin': ('red', 'blue', 'app'), 'red': ('red', 'app'),
-                       'blue': ('blue', 'app'), 'report': ('app',)}[role]
+        eligible = {permission for granted in roles for permission in self._role_permissions(granted)}
+        permissions = tuple(permission for permission in ('red', 'blue', 'app') if permission in eligible)
         existing = auth.user_map.get(username)
         bindings = getattr(self, '_group_role_accounts', {})
         binding = bindings.get(username)
@@ -2278,6 +2370,7 @@ class SamlService(BaseService):
         if self._group_role_policy() is not None:
             identity = getattr(self, '_group_role_identities', {}).get(username)
             if (not self._current_group_account(identity)
+                    or user_info.get('selected_role') != caldera_role
                     or not self._live_group_expiry(user_info.get('authn_expires_at'))
                     or identity.get('name_id') != user_info.get('name_id')
                     or identity.get('groups') != tuple(sorted(set(user_info.get('groups') or [])))):
