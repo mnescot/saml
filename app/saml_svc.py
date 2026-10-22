@@ -22,119 +22,551 @@ from saml2.response import AuthnResponse
 from app.utility.base_service import BaseService
 
 
-# HTML template for the role selection page (served inline — no template engine needed)
-_ROLE_SELECT_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CALDERA — Select Role</title>
-<style>
-  :root {{
-    --bg: #0f1117;
-    --surface: #1a1d27;
-    --card: #20243a;
-    --border: #2d3348;
-    --accent: #3b82f6;
-    --accent-dark: #2563eb;
-    --danger: #ef4444;
-    --success: #22c55e;
-    --text: #e2e8f0;
-    --text-dim: #94a3b8;
-    --sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
-  }}
-  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  html, body {{
-    height: 100%; background: var(--bg); color: var(--text);
-    font-family: var(--sans); font-size: 14px; line-height: 1.5;
-    display: flex; align-items: center; justify-content: center;
-  }}
-  .card {{
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 10px; padding: 36px 40px; width: 380px; max-width: 95vw;
-    box-shadow: 0 8px 32px rgba(0,0,0,.5);
-  }}
-  .logo {{
-    display: flex; align-items: center; gap: 10px; margin-bottom: 28px;
-  }}
-  .logo-icon {{
-    width: 36px; height: 36px; background: var(--accent);
-    border-radius: 8px; display: flex; align-items: center; justify-content: center;
-    font-weight: 900; font-size: 18px; color: #fff; letter-spacing: -.02em;
-  }}
-  .logo-name {{
-    font-size: 18px; font-weight: 800; letter-spacing: .06em;
-    text-transform: uppercase; color: var(--text);
-  }}
-  h2 {{
-    font-size: 16px; font-weight: 700; margin-bottom: 6px;
-  }}
-  .subtitle {{
-    font-size: 13px; color: var(--text-dim); margin-bottom: 28px;
-  }}
-  .name-pill {{
-    display: inline-block; background: rgba(59,130,246,.12);
-    color: var(--accent); border: 1px solid rgba(59,130,246,.25);
-    border-radius: 20px; padding: 2px 12px; font-size: 13px;
-    font-weight: 600; margin-bottom: 28px;
-  }}
-  .role-grid {{
-    display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px;
-  }}
-  .role-btn {{
-    display: flex; flex-direction: column; align-items: center; gap: 8px;
-    padding: 20px 14px; border-radius: 8px; border: 2px solid transparent;
-    cursor: pointer; font-family: inherit; font-size: 14px; font-weight: 700;
-    transition: all .15s; background: var(--surface); color: var(--text);
-    text-transform: uppercase; letter-spacing: .04em;
-  }}
-  .role-btn:hover {{ border-color: currentColor; }}
-  .role-btn .icon {{ font-size: 28px; }}
-  .role-btn.red {{ color: #f87171; }}
-  .role-btn.red:hover {{ background: rgba(239,68,68,.1); }}
-  .role-btn.blue {{ color: #60a5fa; }}
-  .role-btn.blue:hover {{ background: rgba(59,130,246,.1); }}
-  .role-desc {{ font-size: 11px; font-weight: 400; color: var(--text-dim);
-    text-transform: none; letter-spacing: 0; }}
-  .footer {{
-    font-size: 11px; color: var(--text-dim); text-align: center; margin-top: 8px;
-  }}
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="logo">
-    <div class="logo-icon">C</div>
-    <div class="logo-name">Caldera</div>
-  </div>
-  <h2>Choose Your Role</h2>
-  <p class="subtitle">Select the perspective you want for this session.</p>
-  {name_pill}
-  <form method="POST" action="/saml/role-select">
-    <input type="hidden" name="token" value="{token}">
-    <div class="role-grid">
-      {red_button}
-      <button type="submit" name="role" value="blue" class="role-btn blue">
-        <span class="icon">&#128737;</span>
-        Blue Team
-        <span class="role-desc">Defense, detection &amp; incident response</span>
-      </button>
-    </div>
-  </form>
-  <p class="footer">You can switch roles by logging out and back in.</p>
-</div>
-</body>
-</html>"""
+# Shared Fred Hutch Caldera brand mark and stylesheet for SAML role selection pages
+_BRAND_MARK_SVG = (
+    '<svg class="brand-mark" viewBox="0 0 88 88" width="46" height="46" '
+    'fill="none" aria-hidden="true">'
+    '<rect x="4" y="4" width="80" height="80" rx="20" fill="#0d1e36" '
+    'stroke="#00abc8" stroke-opacity="0.45" stroke-width="1.5"/>'
+    '<circle cx="38" cy="39" r="21" stroke="#ffffff" stroke-opacity="0.92" stroke-width="5"/>'
+    '<circle cx="52" cy="35" r="16" stroke="#00abc8" stroke-width="5"/>'
+    '<circle cx="51" cy="52" r="15" stroke="#ffb500" stroke-width="5"/>'
+    '<circle cx="35" cy="53" r="13" stroke="#aa4ac4" stroke-width="5"/>'
+    '<circle cx="44" cy="44" r="4.5" fill="#00abc8"/>'
+    '</svg>'
+)
+
+_ARROW_SVG = (
+    '<svg class="cta-arrow" viewBox="0 0 16 16" width="14" height="14" '
+    'fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<line x1="3" y1="8" x2="13" y2="8"/>'
+    '<polyline points="9 4 13 8 9 12"/>'
+    '</svg>'
+)
+
+_ROLE_PAGE_CSS = """
+  :root {
+    --fh-navy: #1b365d;
+    --fh-ink: #10233f;
+    --fh-teal: #00abc8;
+    --fh-teal-dark: #006d82;
+    --fh-gold: #ffb500;
+    --fh-gold-dark: #8a5a00;
+    --fh-purple: #aa4ac4;
+    --fh-purple-dark: #7e2e96;
+    --fh-crimson: #d63649;
+    --fh-crimson-dark: #a61e30;
+    --fh-sky: #def3f8;
+    --fh-surface: #ffffff;
+    --fh-surface-muted: #f4f7f9;
+    --fh-border: #d7dee4;
+    --fh-text: #10233f;
+    --fh-muted: #47586d;
+    --fh-serif: Georgia, 'Times New Roman', serif;
+    --fh-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --fh-mono: 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    min-height: 100%;
+    background:
+      radial-gradient(circle at 92% 8%, rgba(0, 171, 200, 0.16), transparent 26rem),
+      radial-gradient(circle at 88% 18%, rgba(255, 181, 0, 0.13), transparent 21rem),
+      radial-gradient(circle at 10% 90%, rgba(170, 74, 196, 0.09), transparent 24rem),
+      linear-gradient(180deg, #ffffff 0%, #f7f8f8 42%, #eef2f4 100%);
+    color: var(--fh-text);
+    font-family: var(--fh-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .card {
+    background: var(--fh-surface);
+    border: 1px solid var(--fh-border);
+    border-radius: 14px;
+    width: 100%;
+    max-width: 720px;
+    box-shadow: 0 20px 50px rgba(16, 35, 63, 0.12), 0 4px 14px rgba(16, 35, 63, 0.06);
+    overflow: hidden;
+  }
+  .brand-bar {
+    display: flex;
+    height: 5px;
+    width: 100%;
+  }
+  .brand-bar .bar-teal { flex: 52; background: var(--fh-teal); }
+  .brand-bar .bar-gold { flex: 28; background: var(--fh-gold); }
+  .brand-bar .bar-purple { flex: 20; background: var(--fh-purple); }
+  .card-header {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(135deg, var(--fh-navy) 0%, var(--fh-ink) 100%);
+    border-bottom: 4px solid var(--fh-teal);
+    padding: 26px 32px 24px;
+    color: #ffffff;
+  }
+  .card-header::before {
+    content: "";
+    position: absolute;
+    right: 68px;
+    top: -42px;
+    width: 96px;
+    height: 96px;
+    border-radius: 999px;
+    border: 2px solid rgba(0, 171, 200, 0.24);
+    pointer-events: none;
+  }
+  .card-header::after {
+    content: "";
+    position: absolute;
+    right: -36px;
+    top: -54px;
+    width: 150px;
+    height: 150px;
+    border-radius: 999px;
+    border: 3px solid rgba(170, 74, 196, 0.25);
+    pointer-events: none;
+  }
+  .header-top {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .brand-mark {
+    flex-shrink: 0;
+    filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.28));
+  }
+  .brand-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .brand-kicker {
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #7ce3f4;
+  }
+  .logo-name {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    color: #f8fafc;
+  }
+  .name-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: rgba(0, 171, 200, 0.16);
+    color: #e0f7fb;
+    border: 1px solid rgba(0, 171, 200, 0.42);
+    border-radius: 999px;
+    padding: 5px 13px;
+    font-size: 12.5px;
+    font-weight: 600;
+    max-width: 100%;
+  }
+  .name-pill-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #22d3ee;
+    box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.22);
+    flex-shrink: 0;
+  }
+  .card-header h1, .card-header h2 {
+    position: relative;
+    z-index: 1;
+    font-family: var(--fh-serif);
+    font-size: 27px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    color: #ffffff;
+    margin: 0;
+  }
+  .header-subtitle {
+    position: relative;
+    z-index: 1;
+    font-size: 13.5px;
+    color: #cbd5e1;
+    margin-top: 5px;
+  }
+  .card-body {
+    padding: 26px 32px 28px;
+  }
+  .effective-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: linear-gradient(90deg, #eef9fc 0%, #f5f8fa 100%);
+    border: 1px solid #c5e8f0;
+    border-left: 4px solid var(--fh-teal);
+    border-radius: 10px;
+    padding: 13px 16px;
+    margin-bottom: 22px;
+    color: var(--fh-text);
+  }
+  .effective-banner-icon {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    color: var(--fh-teal-dark);
+    margin-top: 1px;
+  }
+  .effective-banner p {
+    font-size: 13.5px;
+    color: #243b55;
+    line-height: 1.5;
+  }
+  .effective-banner strong {
+    display: inline-block;
+    background: var(--fh-navy);
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.03em;
+    padding: 1px 9px;
+    border-radius: 999px;
+    margin: 0 2px;
+    vertical-align: baseline;
+  }
+  .role-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+    margin-bottom: 6px;
+  }
+  .role-btn {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    text-align: left;
+    gap: 10px;
+    padding: 18px 18px 15px;
+    border-radius: 11px;
+    border: 1.5px solid var(--fh-border);
+    border-top: 4px solid var(--role-accent, var(--fh-teal));
+    cursor: pointer;
+    font-family: inherit;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcfd 100%);
+    color: var(--fh-text);
+    box-shadow: 0 2px 6px rgba(16, 35, 63, 0.04);
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .role-btn:hover, .role-btn:focus-visible {
+    transform: translateY(-2px);
+    border-color: var(--role-accent, var(--fh-teal));
+    background: var(--role-hover-bg, #f7fcfd);
+    box-shadow: 0 10px 24px rgba(16, 35, 63, 0.10);
+    outline: none;
+  }
+  .role-btn.is-effective {
+    border-color: var(--role-accent, var(--fh-teal));
+    box-shadow: 0 6px 18px rgba(16, 35, 63, 0.08);
+  }
+  .role-btn.admin {
+    --role-accent: var(--fh-gold);
+    --role-accent-ink: var(--fh-gold-dark);
+    --role-icon-bg: rgba(255, 181, 0, 0.15);
+    --role-icon-border: rgba(255, 181, 0, 0.38);
+    --role-hover-bg: #fffdf7;
+  }
+  .role-btn.red {
+    --role-accent: var(--fh-crimson);
+    --role-accent-ink: var(--fh-crimson-dark);
+    --role-icon-bg: rgba(214, 54, 73, 0.11);
+    --role-icon-border: rgba(214, 54, 73, 0.30);
+    --role-hover-bg: #fff8f9;
+  }
+  .role-btn.blue {
+    --role-accent: var(--fh-teal);
+    --role-accent-ink: var(--fh-teal-dark);
+    --role-icon-bg: rgba(0, 171, 200, 0.13);
+    --role-icon-border: rgba(0, 171, 200, 0.34);
+    --role-hover-bg: #f6fcfe;
+  }
+  .role-btn.report {
+    --role-accent: var(--fh-purple);
+    --role-accent-ink: var(--fh-purple-dark);
+    --role-icon-bg: rgba(170, 74, 196, 0.12);
+    --role-icon-border: rgba(170, 74, 196, 0.32);
+    --role-hover-bg: #fcf8fe;
+  }
+  .role-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .role-icon-box {
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+    background: var(--role-icon-bg, rgba(0, 171, 200, 0.12));
+    border: 1px solid var(--role-icon-border, rgba(0, 171, 200, 0.3));
+    color: var(--role-accent-ink, var(--fh-navy));
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .role-badge {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--fh-border);
+    color: var(--fh-muted);
+    background: var(--fh-surface-muted);
+  }
+  .role-badge.effective {
+    background: var(--fh-navy);
+    color: #ffffff;
+    border-color: var(--fh-navy);
+  }
+  .role-title-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .role-name {
+    font-family: var(--fh-serif);
+    font-size: 19px;
+    font-weight: 700;
+    color: var(--fh-ink);
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+  }
+  .role-kicker {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--role-accent-ink, var(--fh-teal-dark));
+    letter-spacing: 0.02em;
+  }
+  .role-desc {
+    font-size: 12.5px;
+    font-weight: 400;
+    color: var(--fh-muted);
+    line-height: 1.45;
+    flex-grow: 1;
+  }
+  .role-card-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-top: 10px;
+    margin-top: 2px;
+    border-top: 1px solid #edf1f5;
+  }
+  .role-perms {
+    font-family: var(--fh-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--fh-muted);
+    background: #f1f5f8;
+    padding: 2px 7px;
+    border-radius: 5px;
+    letter-spacing: 0.03em;
+  }
+  .role-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--role-accent-ink, var(--fh-navy));
+  }
+  .cta-arrow {
+    transition: transform 0.15s ease;
+  }
+  .role-btn:hover .cta-arrow, .role-btn:focus-visible .cta-arrow {
+    transform: translateX(3px);
+  }
+  .card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    background: var(--fh-surface-muted);
+    border-top: 1px solid var(--fh-border);
+    padding: 13px 32px;
+    font-size: 12px;
+    color: var(--fh-muted);
+  }
+  .footer-brand {
+    font-weight: 600;
+    color: var(--fh-navy);
+  }
+  .denial-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    background: #fff8f8;
+    border: 1px solid #f3c7ce;
+    border-left: 4px solid var(--fh-crimson);
+    border-radius: 10px;
+    padding: 16px 18px;
+    color: #3b1820;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .denial-icon {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    color: var(--fh-crimson);
+    margin-top: 1px;
+  }
+  @media (max-width: 560px) {
+    .card-header, .card-body, .card-footer { padding-left: 20px; padding-right: 20px; }
+    .role-grid { grid-template-columns: 1fr; }
+  }
+"""
+
+_GROUP_ROLE_META = {
+    'admin': {
+        'kicker': 'Platform Administration & Control',
+        'desc': 'Full Red & Blue operations, agent fleet orchestration, and system configuration.',
+        'perms': 'RED · BLUE · APP',
+        'icon': (
+            '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" '
+            'stroke="currentColor" stroke-width="1.85" stroke-linecap="round" '
+            'stroke-linejoin="round" aria-hidden="true">'
+            '<path d="M12 2.5l7.5 3.2v5.6c0 5.1-3.2 9.4-7.5 10.9-4.3-1.5-7.5-5.8-7.5-10.9V5.7L12 2.5z"/>'
+            '<path d="M12 7.5l1.35 2.75 3.05.45-2.2 2.15.52 3.05L12 14.45 9.28 15.9l.52-3.05-2.2-2.15 3.05-.45L12 7.5z"/>'
+            '</svg>'
+        ),
+    },
+    'red': {
+        'kicker': 'Offensive Security & Emulation',
+        'desc': 'Adversary emulation, offensive operations, and active vulnerability validation.',
+        'perms': 'RED · APP',
+        'icon': (
+            '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" '
+            'stroke="currentColor" stroke-width="1.85" stroke-linecap="round" '
+            'stroke-linejoin="round" aria-hidden="true">'
+            '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>'
+            '<line x1="12" y1="1.75" x2="12" y2="5.5"/>'
+            '<line x1="12" y1="18.5" x2="12" y2="22.25"/>'
+            '<line x1="1.75" y1="12" x2="5.5" y2="12"/>'
+            '<line x1="18.5" y1="12" x2="22.25" y2="12"/>'
+            '</svg>'
+        ),
+    },
+    'blue': {
+        'kicker': 'Defensive Operations & Response',
+        'desc': 'Threat detection, incident response, endpoint defense, and security telemetry.',
+        'perms': 'BLUE · APP',
+        'icon': (
+            '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" '
+            'stroke="currentColor" stroke-width="1.85" stroke-linecap="round" '
+            'stroke-linejoin="round" aria-hidden="true">'
+            '<path d="M12 2.5l7.5 3.2v5.6c0 5.1-3.2 9.4-7.5 10.9-4.3-1.5-7.5-5.8-7.5-10.9V5.7L12 2.5z"/>'
+            '<polyline points="7.75 12.25 10.25 12.25 11.6 9.5 13.1 14.75 14.45 12.25 16.5 12.25"/>'
+            '</svg>'
+        ),
+    },
+    'report': {
+        'kicker': 'Security Intelligence & Reporting',
+        'desc': 'Monitoring reports, posture analytics, and read-only security assistant chat.',
+        'perms': 'APP · READ-ONLY',
+        'icon': (
+            '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" '
+            'stroke="currentColor" stroke-width="1.85" stroke-linecap="round" '
+            'stroke-linejoin="round" aria-hidden="true">'
+            '<rect x="3.5" y="3" width="17" height="18" rx="2.5"/>'
+            '<line x1="8" y1="16.5" x2="8" y2="12.5"/>'
+            '<line x1="12" y1="16.5" x2="12" y2="8.5"/>'
+            '<line x1="16" y1="16.5" x2="16" y2="10.5"/>'
+            '<line x1="7.5" y1="6.5" x2="13.5" y2="6.5"/>'
+            '</svg>'
+        ),
+    },
+}
+
+# HTML template for the legacy 2-role selection page (served inline when group_role_policy is off)
+_ROLE_SELECT_HTML = (
+    '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8">\n'
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+    '<title>Caldera — Select Role</title>\n<style>'
+    + _ROLE_PAGE_CSS.replace('{', '{{').replace('}', '}}')
+    + '</style>\n</head>\n<body>\n<div class="card">\n'
+    '  <div class="brand-bar"><span class="bar-teal"></span><span class="bar-gold"></span><span class="bar-purple"></span></div>\n'
+    '  <div class="card-header">\n'
+    '    <div class="header-top">\n'
+    '      <div class="logo">'
+    + _BRAND_MARK_SVG.replace('{', '{{').replace('}', '}}')
+    + '<div class="brand-meta"><span class="brand-kicker">Fred Hutch Cancer Center</span>'
+    '<span class="logo-name">Caldera Security Operations</span></div></div>\n'
+    '      {name_pill}\n'
+    '    </div>\n'
+    '    <h2>Choose Your Role</h2>\n'
+    '    <p class="header-subtitle">Select the operational perspective for this session.</p>\n'
+    '  </div>\n'
+    '  <div class="card-body">\n'
+    '    <form method="POST" action="/saml/role-select">\n'
+    '      <input type="hidden" name="token" value="{token}">\n'
+    '      <div class="role-grid">\n'
+    '        {red_button}\n'
+    '        <button type="submit" name="role" value="blue" class="role-btn blue">\n'
+    '          <div class="role-card-top"><span class="role-icon-box">'
+    + _GROUP_ROLE_META['blue']['icon']
+    + '</span><span class="role-badge">Defensive</span></div>\n'
+    '          <div class="role-title-group"><span class="role-name">Blue Team</span>'
+    '<span class="role-kicker">Defensive Operations &amp; Response</span></div>\n'
+    '          <span class="role-desc">Defense, detection &amp; incident response</span>\n'
+    '          <div class="role-card-foot"><span class="role-perms">BLUE · APP</span>'
+    '<span class="role-cta">Continue ' + _ARROW_SVG + '</span></div>\n'
+    '        </button>\n'
+    '      </div>\n'
+    '    </form>\n'
+    '  </div>\n'
+    '  <div class="card-footer"><span class="footer-brand">Fred Hutch Information Security</span>'
+    '<span>You can switch roles by logging out and back in.</span></div>\n'
+    '</div>\n</body>\n</html>'
+)
 
 # The Red Team option is rendered ONLY for users the IdP entitles to it (see
 # SamlService._entitled_roles). It is a separate constant so a user with no red
 # entitlement never even sees the button; the POST handler enforces the same
 # entitlement server-side regardless.
-_RED_BUTTON_HTML = """<button type="submit" name="role" value="red" class="role-btn red">
-        <span class="icon">&#9888;</span>
-        Red Team
-        <span class="role-desc">Offensive operations &amp; adversary simulation</span>
-      </button>"""
+_RED_BUTTON_HTML = (
+    '<button type="submit" name="role" value="red" class="role-btn red">\n'
+    '          <div class="role-card-top"><span class="role-icon-box">'
+    + _GROUP_ROLE_META['red']['icon']
+    + '</span><span class="role-badge">Offensive</span></div>\n'
+    '          <div class="role-title-group"><span class="role-name">Red Team</span>'
+    '<span class="role-kicker">Offensive Security &amp; Emulation</span></div>\n'
+    '          <span class="role-desc">Offensive operations &amp; adversary simulation</span>\n'
+    '          <div class="role-card-foot"><span class="role-perms">RED · APP</span>'
+    '<span class="role-cta">Continue ' + _ARROW_SVG + '</span></div>\n'
+    '        </button>'
+)
+
 
 
 class SamlService(BaseService):
@@ -776,9 +1208,55 @@ class SamlService(BaseService):
 
     @staticmethod
     def _no_access():
-        return web.Response(status=403, content_type='text/html',
-            text='<h1>No access</h1><p>Your SAML group memberships do not grant a Caldera role. '
-                 'Contact your Caldera administrator.</p>')
+        return web.Response(
+            status=403,
+            content_type='text/html',
+            text=(
+                '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+                '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+                '<title>Caldera — No access</title><style>' + _ROLE_PAGE_CSS + '</style></head>'
+                '<body><div class="card">'
+                '<div class="brand-bar"><span class="bar-teal"></span>'
+                '<span class="bar-gold"></span><span class="bar-purple"></span></div>'
+                '<div class="card-header"><div class="header-top"><div class="logo">'
+                + _BRAND_MARK_SVG
+                + '<div class="brand-meta"><span class="brand-kicker">Fred Hutch Cancer Center</span>'
+                '<span class="logo-name">Caldera Security Operations</span></div></div></div>'
+                '<h1>No access</h1>'
+                '<p class="header-subtitle">Enterprise SAML Role-Based Access Control</p></div>'
+                '<div class="card-body"><div class="denial-box">'
+                '<svg class="denial-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+                'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>'
+                '<line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+                '<p>Your SAML group memberships do not grant a Caldera role. '
+                'Contact your Caldera administrator.</p></div></div>'
+                '<div class="card-footer"><span class="footer-brand">Fred Hutch Information Security</span>'
+                '<span>Access requires an assigned Entra ID security group.</span></div>'
+                '</div></body></html>'
+            ),
+        )
+
+    def _render_group_role_button(self, role: str, effective: str) -> str:
+        meta = _GROUP_ROLE_META[role]
+        is_effective = role == effective
+        btn_cls = 'role-btn ' + role + (' is-effective' if is_effective else '')
+        badge = (
+            '<span class="role-badge effective">Effective Role</span>'
+            if is_effective
+            else '<span class="role-badge">SAML Granted</span>'
+        )
+        return (
+            '<button type="submit" name="role" value="' + role + '" class="' + btn_cls + '">'
+            '<div class="role-card-top"><span class="role-icon-box">' + meta['icon'] + '</span>'
+            + badge + '</div>'
+            '<div class="role-title-group"><span class="role-name">' + role.title() + '</span>'
+            '<span class="role-kicker">' + meta['kicker'] + '</span></div>'
+            '<span class="role-desc">' + meta['desc'] + '</span>'
+            '<div class="role-card-foot"><span class="role-perms">' + meta['perms'] + '</span>'
+            '<span class="role-cta">Continue ' + _ARROW_SVG + '</span></div>'
+            '</button> '
+        )
 
     async def _group_role_select(self, request):
         if request.method == 'GET':
@@ -803,17 +1281,52 @@ class SamlService(BaseService):
             return self._no_access()
         effective = roles[0]
         if request.method == 'GET':
-            buttons = ''.join('<button name="role" value="' + role + '">' +
-                role.title() + '</button> ' for role in roles)
-            return web.Response(content_type='text/html', text=(
-                '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width">'
-                '<title>Caldera — Select role</title></head>'
-                '<body style="font-family:system-ui;max-width:46rem;margin:4rem auto;padding:1rem">'
-                '<h1>Your Caldera roles</h1><p>Only roles granted by your SAML groups are shown. '
-                'Your effective permissions are those of your highest role: <strong>' +
-                effective.title() + '</strong>.</p><form method="post" action="/saml/role-select">'
-                '<input type="hidden" name="token" value="' + self._html_escape(token) + '">' +
-                buttons + '</form></body></html>'))
+            identity_label = str(
+                info.get('display_name') or info.get('email') or info.get('name_id') or ''
+            ).strip()
+            name_pill = (
+                '<div class="name-pill"><span class="name-pill-dot"></span>'
+                + self._html_escape(identity_label) + '</div>'
+                if identity_label else ''
+            )
+            buttons = ''.join(self._render_group_role_button(role, effective) for role in roles)
+            shield_svg = (
+                '<svg class="effective-banner-icon" viewBox="0 0 24 24" fill="none" '
+                'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+                'stroke-linejoin="round" aria-hidden="true">'
+                '<path d="M12 2.5l7.5 3.2v5.6c0 5.1-3.2 9.4-7.5 10.9-4.3-1.5-7.5-5.8-7.5-10.9V5.7L12 2.5z"/>'
+                '<polyline points="9 12 11.2 14.2 15.5 9.8"/></svg>'
+            )
+            return web.Response(
+                content_type='text/html',
+                text=(
+                    '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+                    '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+                    '<title>Caldera — Select role</title><style>' + _ROLE_PAGE_CSS + '</style></head>'
+                    '<body><div class="card">'
+                    '<div class="brand-bar"><span class="bar-teal"></span>'
+                    '<span class="bar-gold"></span><span class="bar-purple"></span></div>'
+                    '<div class="card-header"><div class="header-top"><div class="logo">'
+                    + _BRAND_MARK_SVG
+                    + '<div class="brand-meta"><span class="brand-kicker">Fred Hutch Cancer Center</span>'
+                    '<span class="logo-name">Caldera Security Operations</span></div></div>'
+                    + name_pill + '</div>'
+                    '<h1>Your Caldera roles</h1>'
+                    '<p class="header-subtitle">Select an authorized role below to launch your session.</p>'
+                    '</div><div class="card-body">'
+                    '<div class="effective-banner">' + shield_svg
+                    + '<p>Only roles granted by your SAML groups are shown. '
+                    'Your effective permissions are those of your highest role: <strong>'
+                    + effective.title() + '</strong>.</p></div>'
+                    '<form method="post" action="/saml/role-select">'
+                    '<input type="hidden" name="token" value="' + self._html_escape(token) + '">'
+                    '<div class="role-grid">' + buttons + '</div>'
+                    '</form></div>'
+                    '<div class="card-footer"><span class="footer-brand">Fred Hutch Information Security</span>'
+                    '<span>Role hierarchy: Admin &rsaquo; Red &rsaquo; Blue &rsaquo; Report</span></div>'
+                    '</div></body></html>'
+                ),
+            )
         if post.get('role', '').lower() not in roles:
             return self._no_access()
         # Choosing a label does not override the deployment's highest-role rule.
@@ -1074,7 +1587,8 @@ class SamlService(BaseService):
             display_name = user_info.get('display_name') or user_info.get('email', 'User')
 
             name_pill = (
-                f'<div class="name-pill">{self._html_escape(display_name)}</div>'
+                f'<div class="name-pill"><span class="name-pill-dot"></span>'
+                f'{self._html_escape(display_name)}</div>'
                 if display_name else ''
             )
             entitled = self._entitled_roles(user_info)
