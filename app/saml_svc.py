@@ -1394,6 +1394,8 @@ class SamlService(BaseService):
         application[api.AUTZ_KEY] = SelectedSessionPolicy()
         auth = self.get_service('auth_svc')
         original_permissions = getattr(auth, 'get_permissions', None)
+        if self._group_role_policy() is not None and not callable(original_permissions):
+            raise RuntimeError('SAML selected-role enforcement requires AuthService.get_permissions')
         if callable(original_permissions):
             async def get_permissions(request):
                 permissions = await original_permissions(request)

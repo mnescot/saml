@@ -84,6 +84,12 @@ class _AuthSvc:
         self.created.append((username, group))
         self.user_map[username] = self.User(username, password, (group, 'app'))
 
+    async def get_permissions(self, request):
+        from aiohttp_security import authorized_userid
+        username = await authorized_userid(request)
+        user = self.user_map.get(username)
+        return list(user.permissions) if user else []
+
 
 def _service(mapping=None, auth_svc=None, log=None):
     """A SamlService without running __init__, which needs real config."""
