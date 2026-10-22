@@ -1617,7 +1617,8 @@ class SamlService(BaseService):
         self._revoke_owned_group_account(info, except_username=username)
         # Core Caldera only understands APP, RED and BLUE. Keep the application
         # roles separate: never place ADMIN/REPORT in Access enum permissions.
-        permissions = self._role_permissions(roles[0])
+        eligible = {permission for granted in roles for permission in self._role_permissions(granted)}
+        permissions = tuple(permission for permission in ('red', 'blue', 'app') if permission in eligible)
         existing = auth.user_map.get(username)
         bindings = getattr(self, '_group_role_accounts', {})
         binding = bindings.get(username)

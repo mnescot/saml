@@ -16,11 +16,12 @@ from aiohttp_security.abc import AbstractAuthorizationPolicy
 from test_four_group_roles import service
 
 
-def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
+@pytest.mark.parametrize('groups', [['A', 'R', 'B', 'P'], ['R', 'B', 'P']])
+def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions(groups):
     svc, auth = service()
     svc.set_saml_login_handler = AsyncMock()
     info = {'email': 'operator@example.org', 'name_id': 'verified-subject',
-            'groups': ['A', 'R', 'B', 'P']}
+            'groups': groups}
 
     class Access(Enum):
         RED = 'red'
@@ -92,7 +93,7 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
         app.router.add_get('/core-check/{permission}', core_check)
         async with TestClient(TestServer(app)) as client:
             cookies = {}
-            for role in ('admin', 'red', 'blue', 'report'):
+            for role in svc._group_roles(info):
                 client.session.cookie_jar.clear()
                 assert (await client.get('/saml/select', params={'role': role}, allow_redirects=False)).status == 302
                 cookies[role] = {key: value.value for key, value in
@@ -123,11 +124,12 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
             assert auth.user_map[info['email']].permissions == ('red', 'blue', 'app')
             # Switching this browser to Red retires its old Admin grant while
             # other browsers retain their own independently selected roles.
-            client.session.cookie_jar.update_cookies(cookies['admin'])
-            assert (await client.get('/saml/select', params={'role': 'red'}, allow_redirects=False)).status == 302
-            assert (await (await client.get('/who')).json())['role'] == 'red'
+            previous, selected = ('admin', 'red') if 'admin' in cookies else ('red', 'blue')
+            client.session.cookie_jar.update_cookies(cookies[previous])
+            assert (await client.get('/saml/select', params={'role': selected}, allow_redirects=False)).status == 302
+            assert (await (await client.get('/who')).json())['role'] == selected
             client.session.cookie_jar.clear()
-            assert (await client.get('/who', cookies=cookies['admin'])).status == 401
+            assert (await client.get('/who', cookies=cookies[previous])).status == 401
             for role in ('blue', 'report'):
                 client.session.cookie_jar.clear()
                 await check(role)
@@ -142,9 +144,9 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
                     assert response.status == 200
                 # A browser carrying a machine key still cannot escape its
                 # selected role through core's account-based enumerator.
-                response = await client.get('/machine-permissions', cookies=cookies['red'],
+                response = await client.get('/machine-permissions', cookies=cookies['blue'],
                                             headers={'KEY': 'test-' + native + '-key'})
-                assert set(await response.json()) <= {'red', 'app'}
+                assert await response.json() == ['blue', 'app']
             # Removing the selected entitlement invalidates existing grants.
             assert await svc._apply_group_role({**info, 'groups': ['P']}, 'report')
             for cookie in cookies.values():
