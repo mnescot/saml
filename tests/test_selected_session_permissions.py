@@ -111,6 +111,11 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
                 client.session.cookie_jar.clear()
                 response = await client.get('/machine-permissions', headers={'KEY': 'test-' + native + '-key'})
                 assert await response.json() == [native, 'app']
+                # A browser carrying a machine key still cannot escape its
+                # selected role through core's account-based enumerator.
+                response = await client.get('/machine-permissions', cookies=cookies['red'],
+                                            headers={'KEY': 'test-' + native + '-key'})
+                assert set(await response.json()) <= {'red', 'app'}
             # Removing the selected entitlement invalidates existing grants.
             assert await svc._apply_group_role({**info, 'groups': ['P']}, 'report')
             for cookie in cookies.values():

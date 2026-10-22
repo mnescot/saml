@@ -1399,9 +1399,6 @@ class SamlService(BaseService):
         if callable(original_permissions):
             async def get_permissions(request):
                 permissions = await original_permissions(request)
-                key_check = getattr(auth, 'request_has_valid_api_key', None)
-                if callable(key_check) and key_check(request):
-                    return permissions
                 grant = scope.get()
                 if grant is None:
                     return permissions
