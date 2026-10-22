@@ -1407,10 +1407,9 @@ class SamlService(BaseService):
                 # policy. A browser's selected role must be checked first,
                 # including requests carrying both session and key credentials.
                 from aiohttp_security import check_permission
-                try:
-                    await check_permission(request, group)
-                except (web.HTTPUnauthorized, web.HTTPForbidden):
-                    return service._no_access()
+                # Core's decorator ignores a returned response. Propagate the
+                # HTTP denial so the protected handler cannot execute.
+                await check_permission(request, group)
             auth.check_permissions = check_permissions
         if callable(original_permissions):
             async def get_permissions(request):

@@ -77,10 +77,12 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
         async def machine_permissions(request):
             return web.json_response([p.value for p in await auth.get_permissions(request)])
 
+        executed = []
         async def core_check(request):
-            denied = await auth.check_permissions(request.match_info['permission'], request)
-            if isinstance(denied, web.StreamResponse):
-                return denied
+            # Match core's check_authorization decorator: its return value
+            # is ignored, so denied checks must raise before this handler runs.
+            await auth.check_permissions(request.match_info['permission'], request)
+            executed.append(request.match_info['permission'])
             return web.Response(text='allowed')
 
         app.router.add_get('/saml/select', select)
@@ -108,9 +110,11 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions():
                 for key in (None, 'test-red-key', 'test-blue-key'):
                     for permission in ('red', 'blue', 'app'):
                         client.session.cookie_jar.clear()
+                        before = len(executed)
                         response = await client.get('/core-check/' + permission, cookies=cookies[role],
                             headers={'KEY': key} if key else {})
                         assert response.status == (200 if permission in svc._role_permissions(role) else 403)
+                        assert len(executed) == before + int(permission in svc._role_permissions(role))
             assert auth.user_map[info['email']].permissions == ('red', 'blue', 'app')
             # Switching this browser to Red retires its old Admin grant while
             # other browsers retain their own independently selected roles.
