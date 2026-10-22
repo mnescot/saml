@@ -43,14 +43,14 @@ def test_none_and_unknown_groups_show_no_access_without_provisioning():
     assert not auth.user_map
 
 
-def test_picker_offers_exact_roles_and_displays_highest_permission_rule():
+def test_picker_offers_exact_roles_and_explains_selected_session_permissions():
     svc, _ = service()
     svc._peek_pending_auth = lambda token: {'email': 'a@example.org', 'groups': ['P', 'B']}
     request = SimpleNamespace(method='GET', rel_url=SimpleNamespace(query={'token': '<test>'}))
     result = asyncio.run(svc.saml_role_select_handler(request))
     assert 'value="blue"' in result.text and 'value="report"' in result.text
     assert 'value="red"' not in result.text and 'value="admin"' not in result.text
-    assert '&lt;test&gt;' in result.text and 'highest role' in result.text
+    assert '&lt;test&gt;' in result.text and 'only the role you select' in result.text
     assert 'brand-mark' in result.text and 'effective-banner' in result.text
     assert 'role-badge effective' in result.text and 'a@example.org' in result.text
     assert '--fh-gold-dark: #8a5a00;' in result.text and '--fh-teal-dark: #006d82;' in result.text
@@ -66,10 +66,12 @@ def test_report_core_permission_is_app_only_and_downgrades_old_red_account():
     assert not asyncio.run(svc._apply_group_role(info, 'admin'))
 
 
-def test_lower_picker_choice_cannot_override_highest_group_role():
+def test_selected_role_must_be_granted_and_is_distinct_from_the_account_ceiling():
     svc, auth = service()
     info = {'email': 'a@example.org', 'name_id': 'stable', 'groups': ['P', 'A']}
-    assert not asyncio.run(svc._apply_group_role(info, 'report'))
+    assert asyncio.run(svc._apply_group_role(info, 'report'))
+    assert info['selected_role'] == 'report'
+    assert not asyncio.run(svc._apply_group_role(info, 'red'))
     assert asyncio.run(svc._apply_group_role(info, 'admin'))
     assert auth.user_map['a@example.org'].permissions == ('red', 'blue', 'app')
 
@@ -81,7 +83,7 @@ def test_provisioning_opt_out_still_prevents_creating_accounts():
     assert not auth.user_map
 
 
-def test_posting_lower_owned_role_still_applies_highest_permissions_and_consumes_pending_auth():
+def test_posting_lower_owned_role_applies_selection_and_consumes_pending_auth():
     svc, auth = service()
     info = {'email': 'a@example.org', 'name_id': 'stable', 'groups': ['P', 'A']}
     popped = []
@@ -95,7 +97,8 @@ def test_posting_lower_owned_role_still_applies_highest_permissions_and_consumes
         return {'token': 'one-use', 'role': 'report'}
     request = SimpleNamespace(method='POST', post=post)
     assert asyncio.run(svc.saml_role_select_handler(request)) == 'signed-in'
-    assert seen == ['admin'] and popped == ['one-use']
+    assert seen == ['report'] and popped == ['one-use']
+    assert info['selected_role'] == 'report'
     assert auth.user_map['a@example.org'].permissions == ('red', 'blue', 'app')
 
 
@@ -527,6 +530,9 @@ def test_plugin_enable_registers_the_session_guard():
     exec(compile(ast.Module(body=[enable], type_ignores=[]), 'saml-hook', 'exec'), namespace)
     async def check():
         app = web.Application()
+        from aiohttp_security import api
+        app[api.AUTZ_KEY] = SimpleNamespace(authorized_userid=AsyncMock(return_value=None),
+                                           permits=AsyncMock(return_value=False))
         await namespace['enable']({'app_svc': SimpleNamespace(application=app)})
         assert len(app.middlewares) == 0
         app.on_startup.freeze()

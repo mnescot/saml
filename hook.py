@@ -16,6 +16,7 @@ async def enable(services):
     async def install_group_session_guard(application):
         # Plugins load before AuthService.apply installs aiohttp-session.
         # Startup runs after that setup, before the middleware chain freezes.
+        saml_svc.install_session_permissions(application)
         application.middlewares.append(group_session_guard)
 
     app.on_startup.append(install_group_session_guard)

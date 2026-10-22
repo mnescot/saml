@@ -151,17 +151,22 @@ precedence when the deployment uses a custom claim name.
 Only group membership in the validated SAML assertion grants these roles.
 Role attributes, email domains and the legacy default role do not grant access
 in this mode. The picker offers exactly the user's memberships; no match shows
-**No access**. Effective permissions always follow **Admin > Red > Blue > Report**,
-regardless of which owned label the user selects. Admin receives core Red/Blue
+**No access**. The selected role determines that browser session's permissions.
+An Admin-group member choosing Red receives a Red session; Admin permissions
+require selecting Admin in a new verified sign-in. Admin receives core Red/Blue
 permissions; Red and Blue keep their corresponding core permissions; Report
 receives application access only. InfoSec Agent separately enforces the same
-group policy for its UI, API and tools. The deployment must configure both.
+group policy and selected session role for its UI, API and tools. The deployment
+must configure both. The hierarchy orders available choices and supplies the
+account's membership ceiling; selecting a lower role does not activate it.
+Concurrent browser sessions keep independent role limits. Core permission
+checks and `AuthService.get_permissions(request)` both enforce that limit.
 
 Existing account-creation/update opt-outs still apply. If the exact permissions
 cannot be applied, sign-in is refused rather than retaining an older role.
 
 Other server-side plugins may call `verified_group_identity(request)` when they
-need direct SAML roles without optional Cognito web identity. It authenticates
+need verified SAML groups and the `selected_role`, including alongside Cognito. It authenticates
 the core cookie session and returns only a live, server-owned assertion record,
 bound to that account and NameID. `current_group_identity(record)` revalidates
 it after changes; copied records, revoked/replaced accounts and machine
