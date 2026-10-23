@@ -17,6 +17,9 @@ async def enable(services):
         # Plugins load before AuthService.apply installs aiohttp-session.
         # Startup runs after that setup, before the middleware chain freezes.
         saml_svc.install_session_permissions(application)
+        if (saml_svc._group_role_policy() is not None
+                and getattr(saml_svc, '_session_permission_scope', None) is None):
+            raise RuntimeError('SAML selected-role authorization was not installed')
         application.middlewares.append(group_session_guard)
 
     app.on_startup.append(install_group_session_guard)
