@@ -1598,7 +1598,7 @@ class SamlService(BaseService):
         from aiohttp_session import get_session
         username = user_info.get('email')
         session = await get_session(request)
-        if (not self._current_requires_selection(identity)
+        if (not self._current_group_account(identity)
                 or user_info.get('selected_role') not in self._group_roles(user_info)
                 or not self._live_group_expiry(user_info.get('authn_expires_at'))):
             raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
@@ -2393,7 +2393,7 @@ class SamlService(BaseService):
         identity = None
         if self._group_role_policy() is not None:
             identity = getattr(self, '_group_role_identities', {}).get(username)
-            if (not self._current_requires_selection(identity)
+            if (not self._current_group_account(identity)
                     or user_info.get('selected_role') != caldera_role
                     or not self._live_group_expiry(user_info.get('authn_expires_at'))
                     or identity.get('name_id') != user_info.get('name_id')
