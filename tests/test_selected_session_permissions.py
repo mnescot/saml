@@ -4,7 +4,7 @@ import asyncio
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -77,19 +77,41 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions(gr
                                       'enumerated': enumerated})
 
         async def machine_permissions(request):
-            return web.json_response([p.value for p in await auth.get_permissions(request)])
+            reset = svc._session_permission_scope.set(None) if request.query.get('fresh') else None
+            try:
+                if request.query.get('missing_marker'):
+                    (await session.get_session(request)).pop('saml_assertion_marker', None)
+                return web.json_response([p.value for p in await auth.get_permissions(request)])
+            finally:
+                if reset is not None:
+                    svc._session_permission_scope.reset(reset)
+
+        async def unscoped_policy(request):
+            reset = svc._session_permission_scope.set(None)
+            try:
+                return web.json_response(await security.permits(request, 'red'))
+            finally:
+                svc._session_permission_scope.reset(reset)
 
         executed = []
         async def core_check(request):
             # Match core's check_authorization decorator: its return value
             # is ignored, so denied checks must raise before this handler runs.
-            await auth.check_permissions(request.match_info['permission'], request)
-            executed.append(request.match_info['permission'])
-            return web.Response(text='allowed')
+            reset = svc._session_permission_scope.set(None) if request.query.get('fresh') else None
+            try:
+                if request.query.get('missing_marker'):
+                    (await session.get_session(request)).pop('saml_assertion_marker', None)
+                await auth.check_permissions(request.match_info['permission'], request)
+                executed.append(request.match_info['permission'])
+                return web.Response(text='allowed')
+            finally:
+                if reset is not None:
+                    svc._session_permission_scope.reset(reset)
 
         app.router.add_get('/saml/select', select)
         app.router.add_get('/who', who)
         app.router.add_get('/machine-permissions', machine_permissions)
+        app.router.add_get('/unscoped-policy', unscoped_policy)
         app.router.add_get('/core-check/{permission}', core_check)
         async with TestClient(TestServer(app)) as client:
             cookies = {}
@@ -121,6 +143,28 @@ def test_selected_roles_bound_core_permissions_in_concurrent_browser_sessions(gr
                             headers={'KEY': key} if key else {})
                         assert response.status == (200 if permission in svc._role_permissions(role) else 403)
                         assert len(executed) == before + int(permission in svc._role_permissions(role))
+            for role in cookies:
+                client.session.cookie_jar.clear()
+                # Raw policy checks without request scope never use a SAML
+                # account ceiling, even when that account is Admin-eligible.
+                response = await client.get('/unscoped-policy', cookies=cookies[role])
+                assert await response.json() is False
+                # The request-aware APIs recover only this browser's live
+                # marker and selected role in a fresh ContextVar context.
+                response = await client.get('/machine-permissions?fresh=1', cookies=cookies[role],
+                    headers={'KEY': 'test-red-key'})
+                assert await response.json() == list(svc._role_permissions(role))
+                for permission in ('red', 'blue', 'app'):
+                    response = await client.get('/core-check/' + permission + '?fresh=1',
+                        cookies=cookies[role], headers={'KEY': 'test-red-key'})
+                    assert response.status == (200 if permission in svc._role_permissions(role) else 403)
+            for role in cookies:
+                for path in ('/machine-permissions', '/core-check/red'):
+                    client.session.cookie_jar.clear()
+                    response = await client.get(path + '?fresh=1&missing_marker=1', cookies=cookies[role],
+                        headers={'KEY': 'test-red-key'})
+                    assert response.status == 403
+            client.session.cookie_jar.clear()
             assert auth.user_map[info['email']].permissions == ('red', 'blue', 'app')
             # Switching this browser to Red retires its old Admin grant while
             # other browsers retain their own independently selected roles.
@@ -172,3 +216,54 @@ def test_alternate_credentials_cannot_inherit_an_ambient_browser_role(header):
     request = SimpleNamespace(headers={header: 'unverified credential'}, cookies={'API_SESSION': 'ambient'})
     assert asyncio.run(svc.verified_group_identity(request)) is None
     svc._session_group_identity.assert_not_called()
+
+
+def test_group_mode_fails_startup_if_permission_installation_has_no_scope():
+    svc, _ = service()
+    svc.set_saml_login_handler = AsyncMock()
+    svc.install_session_permissions = Mock()
+
+    async def exercise():
+        app = web.Application()
+        tree = ast.parse((Path(__file__).parents[1] / 'hook.py').read_text())
+        enable = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'enable')
+        namespace = {'web': web, 'SamlService': lambda: svc}
+        exec(compile(ast.Module(body=[enable], type_ignores=[]), 'saml-hook', 'exec'), namespace)
+        await namespace['enable']({'app_svc': SimpleNamespace(application=app)})
+        app.freeze()
+        with pytest.raises(RuntimeError, match='authorization was not installed'):
+            await app.startup()
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('group_mode', [True, False])
+def test_missing_scope_with_persisted_account_never_falls_back_to_its_group_ceiling(group_mode):
+    svc, auth = service()
+    subject = 'persisted@example.org'
+    svc._group_role_accounts = {}
+    svc._session_group_identity = AsyncMock(return_value=None)
+    if not group_mode:
+        svc._group_role_policy = lambda: None
+    original_get = AsyncMock(return_value=['native'])
+    original_check = AsyncMock()
+    auth.get_permissions = original_get
+    auth.check_permissions = original_check
+    app = {}
+    from aiohttp_security import api
+    app[api.AUTZ_KEY] = SimpleNamespace(permits=AsyncMock(return_value=True),
+        authorized_userid=AsyncMock(return_value=subject))
+    svc.install_session_permissions(app)
+
+    async def exercise():
+        request = SimpleNamespace(headers={'KEY': 'valid-machine-key'})
+        with patch('aiohttp_security.authorized_userid', AsyncMock(return_value=subject)):
+            assert await app[api.AUTZ_KEY].permits(subject, 'red') is (not group_mode)
+            if group_mode:
+                with pytest.raises(web.HTTPForbidden): await auth.get_permissions(request)
+                with pytest.raises(web.HTTPForbidden): await auth.check_permissions('red', request)
+                original_get.assert_not_awaited(); original_check.assert_not_awaited()
+            else:
+                assert await auth.get_permissions(request) == ['native']
+                await auth.check_permissions('red', request)
+                original_check.assert_awaited_once()
+    asyncio.run(exercise())

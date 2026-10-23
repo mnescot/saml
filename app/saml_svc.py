@@ -1377,6 +1377,28 @@ class SamlService(BaseService):
         self._session_permission_scope = scope
         service = self
 
+        def requires_selection(username):
+            # Group mode governs every browser identity, including persisted
+            # core accounts after restart before ownership bindings rebuild.
+            # Key-only callers have no browser userid; legacy mode is unchanged.
+            return bool(username and service._group_role_policy() is not None)
+
+        async def request_grant(request):
+            grant = scope.get()
+            if grant is not None:
+                return grant
+            from aiohttp_security import authorized_userid
+            username = await authorized_userid(request)
+            if not requires_selection(username):
+                return None
+            # Permission APIs may be invoked in a fresh context or outside
+            # this middleware. Only the browser's own live SAML marker can
+            # recover its role; the account ceiling is never a fallback.
+            record = await service._session_group_identity(request)
+            if record is None:
+                raise web.HTTPForbidden(text='A live selected SAML session is required.')
+            return username, record
+
         class SelectedSessionPolicy(AbstractAuthorizationPolicy):
             async def authorized_userid(self, identity):
                 return await original.authorized_userid(identity)
@@ -1386,7 +1408,7 @@ class SamlService(BaseService):
                     return False
                 grant = scope.get()
                 if grant is None:
-                    return True
+                    return not requires_selection(identity)
                 username, record = grant
                 return (identity == username and service.current_group_identity(record)
                         and permission in service._role_permissions(record['selected_role']))
@@ -1401,19 +1423,21 @@ class SamlService(BaseService):
             raise RuntimeError('SAML selected-role enforcement requires AuthService.check_permissions')
         if callable(original_check):
             async def check_permissions(group, request):
-                if scope.get() is None:
+                grant = await request_grant(request)
+                if grant is None:
                     return await original_check(group, request)
-                # Core accepts a valid KEY before consulting its authorization
-                # policy. A browser's selected role must be checked first,
-                # including requests carrying both session and key credentials.
                 from aiohttp_security import check_permission
-                # Core's decorator ignores a returned response. Propagate the
-                # HTTP denial so the protected handler cannot execute.
-                await check_permission(request, group)
+                reset = scope.set(grant)
+                try:
+                    # Match core's decorator: denial must raise, including a
+                    # browser request that also supplies a valid machine key.
+                    await check_permission(request, group)
+                finally:
+                    scope.reset(reset)
             auth.check_permissions = check_permissions
         if callable(original_permissions):
             async def get_permissions(request):
-                grant = scope.get()
+                grant = await request_grant(request)
                 if grant is None:
                     return await original_permissions(request)
                 username, record = grant
