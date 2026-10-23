@@ -1377,12 +1377,11 @@ class SamlService(BaseService):
         self._session_permission_scope = scope
         service = self
 
-        def group_account(username):
-            binding = getattr(service, '_group_role_accounts', {}).get(username)
-            return bool(auth is not None and (
-                (binding and auth.user_map.get(username) is binding[1])
-                or (username in getattr(service, '_group_role_denials', {})
-                    and auth.user_map.get(username) is service._group_role_denials[username])))
+        def requires_selection(username):
+            # Group mode governs every browser identity, including persisted
+            # core accounts after restart before ownership bindings rebuild.
+            # Key-only callers have no browser userid; legacy mode is unchanged.
+            return bool(username and service._group_role_policy() is not None)
 
         async def request_grant(request):
             grant = scope.get()
@@ -1390,7 +1389,7 @@ class SamlService(BaseService):
                 return grant
             from aiohttp_security import authorized_userid
             username = await authorized_userid(request)
-            if not group_account(username):
+            if not requires_selection(username):
                 return None
             # Permission APIs may be invoked in a fresh context or outside
             # this middleware. Only the browser's own live SAML marker can
@@ -1409,7 +1408,7 @@ class SamlService(BaseService):
                     return False
                 grant = scope.get()
                 if grant is None:
-                    return not group_account(identity)
+                    return not requires_selection(identity)
                 username, record = grant
                 return (identity == username and service.current_group_identity(record)
                         and permission in service._role_permissions(record['selected_role']))
@@ -1599,7 +1598,7 @@ class SamlService(BaseService):
         from aiohttp_session import get_session
         username = user_info.get('email')
         session = await get_session(request)
-        if (not self._current_group_account(identity)
+        if (not self._current_requires_selection(identity)
                 or user_info.get('selected_role') not in self._group_roles(user_info)
                 or not self._live_group_expiry(user_info.get('authn_expires_at'))):
             raise web.HTTPForbidden(text='Sign-in could not complete. Contact your administrator.')
@@ -2394,7 +2393,7 @@ class SamlService(BaseService):
         identity = None
         if self._group_role_policy() is not None:
             identity = getattr(self, '_group_role_identities', {}).get(username)
-            if (not self._current_group_account(identity)
+            if (not self._current_requires_selection(identity)
                     or user_info.get('selected_role') != caldera_role
                     or not self._live_group_expiry(user_info.get('authn_expires_at'))
                     or identity.get('name_id') != user_info.get('name_id')

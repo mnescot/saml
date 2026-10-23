@@ -4,7 +4,7 @@ import asyncio
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -233,4 +233,37 @@ def test_group_mode_fails_startup_if_permission_installation_has_no_scope():
         app.freeze()
         with pytest.raises(RuntimeError, match='authorization was not installed'):
             await app.startup()
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('group_mode', [True, False])
+def test_missing_scope_with_persisted_account_never_falls_back_to_its_group_ceiling(group_mode):
+    svc, auth = service()
+    subject = 'persisted@example.org'
+    svc._group_role_accounts = {}
+    svc._session_group_identity = AsyncMock(return_value=None)
+    if not group_mode:
+        svc._group_role_policy = lambda: None
+    original_get = AsyncMock(return_value=['native'])
+    original_check = AsyncMock()
+    auth.get_permissions = original_get
+    auth.check_permissions = original_check
+    app = {}
+    from aiohttp_security import api
+    app[api.AUTZ_KEY] = SimpleNamespace(permits=AsyncMock(return_value=True),
+        authorized_userid=AsyncMock(return_value=subject))
+    svc.install_session_permissions(app)
+
+    async def exercise():
+        request = SimpleNamespace(headers={'KEY': 'valid-machine-key'})
+        with patch('aiohttp_security.authorized_userid', AsyncMock(return_value=subject)):
+            assert await app[api.AUTZ_KEY].permits(subject, 'red') is (not group_mode)
+            if group_mode:
+                with pytest.raises(web.HTTPForbidden): await auth.get_permissions(request)
+                with pytest.raises(web.HTTPForbidden): await auth.check_permissions('red', request)
+                original_get.assert_not_awaited(); original_check.assert_not_awaited()
+            else:
+                assert await auth.get_permissions(request) == ['native']
+                await auth.check_permissions('red', request)
+                original_check.assert_awaited_once()
     asyncio.run(exercise())
