@@ -45,6 +45,9 @@ async def enable(services):
     # authentication, when their assertion entitles them to more than one).
     app.router.add_route('GET',  '/saml/role-select', saml_svc.saml_role_select_handler)
     app.router.add_route('POST', '/saml/role-select', saml_svc.saml_role_select_handler)
+    # The caller's own session deadlines (idle and absolute), for the console's
+    # expiry warning; reading it never extends the session.
+    app.router.add_route('GET', '/saml/session', saml_svc.saml_session_status_handler)
 
 
     # Set SAML as the default login handler (enables auto-redirect)
