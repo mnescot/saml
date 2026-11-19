@@ -137,7 +137,7 @@ def test_requests_without_a_report_do_not_extend_it():
 def test_a_browser_navigation_counts_as_activity():
     clock = Clock()
     svc, info, cookie = signed_in(clock)
-    page = {'Accept': 'text/html', 'Sec-Fetch-Mode': 'navigate'}
+    page = {'Accept': 'text/html', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'same-origin'}
     for _ in range(3):  # 150 minutes of moving between pages
         clock.now += 50 * 60
         assert request(svc, info, cookie, clock, headers=page) == 200
@@ -146,6 +146,40 @@ def test_a_browser_navigation_counts_as_activity():
     assert request(svc, info, cookie, clock, headers={'Sec-Fetch-Mode': 'cors'}) == 200
     clock.now += 10 * 60 + 1
     assert request(svc, info, cookie, clock, headers={'Sec-Fetch-Mode': 'no-cors'}) == 401
+
+
+@pytest.mark.parametrize('site', ['cross-site', 'same-site', None])
+def test_a_navigation_another_site_started_is_not_activity(site):
+    """A third-party page sending the browser here (link, window.open,
+    location=...) carries the cookie but is not the user working in Caldera."""
+    clock = Clock()
+    svc, info, cookie = signed_in(clock)
+    signed_in_at = clock.now
+    clock.now += 30 * 60
+    headers = {'Accept': 'text/html', 'Sec-Fetch-Mode': 'navigate'}
+    if site:
+        headers['Sec-Fetch-Site'] = site
+    assert request(svc, info, cookie, clock, headers=headers) == 200
+    assert svc._session_activity(info['email'])[cookie['saml_assertion_marker']] == signed_in_at
+
+
+def test_a_typed_address_or_bookmark_is_activity():
+    clock = Clock()
+    svc, info, cookie = signed_in(clock)
+    clock.now += 30 * 60
+    typed = {'Accept': 'text/html', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'none'}
+    assert request(svc, info, cookie, clock, headers=typed) == 200
+    assert svc._session_activity(info['email'])[cookie['saml_assertion_marker']] == clock.now
+
+
+def test_an_oversized_report_is_not_activity_and_does_not_fail_the_request():
+    clock = Clock()
+    svc, info, cookie = signed_in(clock)
+    signed_in_at = clock.now
+    clock.now += 10 * 60
+    for value in ('9' * 5000, '0, ' + '1' * 11):
+        assert request(svc, info, cookie, clock, headers={HEADER: value}) == 200
+    assert svc._session_activity(info['email'])[cookie['saml_assertion_marker']] == signed_in_at
 
 
 def test_a_report_repeated_by_two_layers_counts_the_least_activity():
@@ -275,6 +309,18 @@ def test_a_status_read_carrying_an_input_report_counts_that_input():
     assert body['idle_expires_at'] == int(clock.now - 30 + 3600)
     clock.now += 50 * 60
     assert status(svc, info, cookie, clock)['authenticated'] is True
+
+
+def test_opening_the_status_url_as_a_page_is_not_activity():
+    """Only the console's explicit report counts there; a navigation to the
+    URL (from any site) does not."""
+    clock = Clock()
+    svc, info, cookie = signed_in(clock)
+    signed_in_at = clock.now
+    clock.now += 30 * 60
+    page = {'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'none'}
+    assert status(svc, info, cookie, clock, headers=page)['authenticated'] is True
+    assert svc._session_activity(info['email'])[cookie['saml_assertion_marker']] == signed_in_at
 
 
 def test_status_without_a_group_policy_reports_unmanaged():

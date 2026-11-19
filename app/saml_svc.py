@@ -580,9 +580,10 @@ class SamlService(BaseService):
     # this often. The IdP's SessionNotOnOrAfter shortens it further.
     _GROUP_SESSION_MAX_LIFETIME = 43200
     # Sent by the console with each request: whole seconds since the user's
-    # last keyboard/pointer input in that tab. Only this report, or a browser
-    # navigation (Sec-Fetch-Mode: navigate, which page script cannot set),
-    # counts as activity; any other request leaves the idle clock running, so
+    # last keyboard/pointer input in that tab. Only this report (a cross-site
+    # page cannot attach a custom header without a CORS preflight Caldera never
+    # grants), or a same-origin or user-typed browser navigation (Sec-Fetch-*
+    # headers, which page script cannot set), counts as activity; any other request leaves the idle clock running, so
     # a poller the console does not instrument cannot keep an unattended
     # session alive. The report is client-supplied: the idle timeout protects
     # an unattended browser, not a stolen cookie, which the hard ceiling bounds.
@@ -1553,7 +1554,7 @@ class SamlService(BaseService):
             return
         idle = self._reported_input_idle(request)
         if idle is None:
-            if (request.headers.get('Sec-Fetch-Mode') or '').lower() != 'navigate':
+            if not self._user_navigation(request):
                 return  # Not user activity: the idle clock keeps running.
             idle = 0
         now = time.time()
@@ -1563,6 +1564,16 @@ class SamlService(BaseService):
         previous = activity.get(marker)
         seen = now - idle
         activity[marker] = max(previous, seen) if isinstance(previous, (int, float)) else seen
+
+    @staticmethod
+    def _user_navigation(request):
+        """A page load the user made here: moving between Caldera pages, or a
+        typed address/bookmark (Sec-Fetch-Site: none). A navigation another
+        site started (a link, window.open, location=...) carries the cookie
+        too, but it is not this user working in Caldera."""
+        headers = request.headers
+        return ((headers.get('Sec-Fetch-Mode') or '').lower() == 'navigate'
+                and (headers.get('Sec-Fetch-Site') or '').lower() in ('same-origin', 'none'))
 
     def _reported_input_idle(self, request):
         """Seconds since the user's last input as the request reports it, or
@@ -1575,7 +1586,9 @@ class SamlService(BaseService):
         values = []
         for part in raw.split(','):
             part = part.strip()
-            if not part.isascii() or not part.isdigit():
+            # Ten digits already exceed any idle time; longer is not a report
+            # (and would cost int() a quadratic parse).
+            if not part.isascii() or not part.isdigit() or len(part) > 10:
                 return None
             values.append(int(part))
         return min(max(values), 10 * 86400) if values else None
@@ -1594,7 +1607,9 @@ class SamlService(BaseService):
             return web.json_response({'managed': True, 'authenticated': False}, headers=headers)
         from aiohttp_session import get_session
         session = await get_session(request)
-        self._touch_group_session(request, record.get('subject'), session)
+        if self._reported_input_idle(request) is not None:
+            # Only an explicit input report: opening this URL is not work.
+            self._touch_group_session(request, record.get('subject'), session)
         idle, _ = self._session_limits()
         last = self._session_activity(record.get('subject')).get(session.get('saml_assertion_marker'))
         now = time.time()
