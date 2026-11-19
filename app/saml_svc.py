@@ -577,8 +577,11 @@ class SamlService(BaseService):
     _GROUP_SESSION_IDLE_TIMEOUT = 3600
     # Hard ceiling from sign-in, however active the user is: entitlements
     # (directory group membership) are re-read from a fresh assertion at least
-    # this often. The IdP's SessionNotOnOrAfter shortens it further.
-    _GROUP_SESSION_MAX_LIFETIME = 43200
+    # this often, so a group removal takes effect within it. One working day;
+    # policy may lower it (to an hour) but never raise it. The IdP's
+    # SessionNotOnOrAfter shortens it further.
+    _GROUP_SESSION_MAX_LIFETIME = 28800
+    _GROUP_SESSION_MAX_LIFETIME_LIMIT = 28800
     # Sent by the console with each request: whole seconds since the user's
     # last keyboard/pointer input in that tab. Only this report (a cross-site
     # page cannot attach a custom header without a CORS preflight Caldera never
@@ -1533,7 +1536,8 @@ class SamlService(BaseService):
                 return default
             return max(low, min(value, high))
         idle = bounded('session_idle_timeout_seconds', self._GROUP_SESSION_IDLE_TIMEOUT, 300, 14400)
-        lifetime = bounded('session_max_lifetime_seconds', self._GROUP_SESSION_MAX_LIFETIME, 3600, 86400)
+        lifetime = bounded('session_max_lifetime_seconds', self._GROUP_SESSION_MAX_LIFETIME, 3600,
+                           self._GROUP_SESSION_MAX_LIFETIME_LIMIT)
         # The ceiling is the administrator's revalidation interval; an idle
         # window longer than it is cut down, never the ceiling stretched.
         return min(idle, lifetime), lifetime

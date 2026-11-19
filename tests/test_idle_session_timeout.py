@@ -3,7 +3,7 @@
 Operators were signed out mid-task: the grant lived min(1 h, the assertion's
 Conditions/NotOnOrAfter), and Entra issues assertions valid for about an hour,
 so an active operator lost the session at the hour regardless. The session now
-slides on activity (60 minutes by default) under a hard ceiling (12 hours, or
+slides on activity (60 minutes by default) under a hard ceiling (8 hours, or
 the IdP's SessionNotOnOrAfter) that still forces a fresh assertion, and with it
 fresh group membership, at least that often.
 
@@ -205,7 +205,7 @@ def test_a_report_never_moves_activity_past_the_request_or_back_in_time():
 def test_the_hard_ceiling_still_forces_a_fresh_sign_in():
     clock = Clock()
     svc, info, cookie = signed_in(clock)
-    for _ in range(16):  # 16 x 50 minutes passes the 12-hour ceiling
+    for _ in range(16):  # 16 x 50 minutes passes the 8-hour ceiling
         clock.now += 50 * 60
         status = request(svc, info, cookie, clock, headers=TYPING)
         if clock.now - 1_800_000_000.0 >= svc._GROUP_SESSION_MAX_LIFETIME:
@@ -224,7 +224,8 @@ def test_policy_can_tune_both_limits_within_bounds():
     assert svc._session_limits() == (1800, 28800)
     svc._saml_config['group_role_policy'] = {**policy, 'session_idle_timeout_seconds': 5,
                                              'session_max_lifetime_seconds': 10 ** 9}
-    assert svc._session_limits() == (300, 86400)
+    # A policy can shorten the ceiling but never stretch it past one working day.
+    assert svc._session_limits() == (300, 28800)
     svc._saml_config['group_role_policy'] = {**policy, 'session_idle_timeout_seconds': True,
                                              'session_max_lifetime_seconds': '99'}
     assert svc._session_limits() == (svc._GROUP_SESSION_IDLE_TIMEOUT, svc._GROUP_SESSION_MAX_LIFETIME)

@@ -412,7 +412,7 @@ def test_protected_permission_sets_accept_every_native_tuple_order(role):
 
 
 @pytest.mark.parametrize('condition,session,expected', [(100, 50, 50), (50, 100, 100),
-    (7200, None, 43200), (None, None, 43200), (-1, None, -1), (100, 90000, 43200)])
+    (7200, None, 28800), (None, None, 28800), (-1, None, -1), (100, 90000, 28800)])
 def test_grant_deadline_is_the_max_lifetime_cut_by_the_idp_session_not_the_assertion(
         condition, session, expected):
     """SessionNotOnOrAfter bounds the session; Conditions/NotOnOrAfter only
