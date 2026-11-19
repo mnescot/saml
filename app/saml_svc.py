@@ -580,9 +580,12 @@ class SamlService(BaseService):
     # this often. The IdP's SessionNotOnOrAfter shortens it further.
     _GROUP_SESSION_MAX_LIFETIME = 43200
     # Sent by the console with each request: whole seconds since the user's
-    # last keyboard/pointer input in that tab. A background poll from an
-    # unattended tab therefore does not keep the session alive. Requests
-    # without it (page loads, forms, other clients) count as activity.
+    # last keyboard/pointer input in that tab. Only this report, or a browser
+    # navigation (Sec-Fetch-Mode: navigate, which page script cannot set),
+    # counts as activity; any other request leaves the idle clock running, so
+    # a poller the console does not instrument cannot keep an unattended
+    # session alive. The report is client-supplied: the idle timeout protects
+    # an unattended browser, not a stolen cookie, which the hard ceiling bounds.
     _INPUT_IDLE_HEADER = 'X-Caldera-Input-Idle-Seconds'
     _MAX_GROUP_SESSIONS = 64
 
@@ -1530,7 +1533,9 @@ class SamlService(BaseService):
             return max(low, min(value, high))
         idle = bounded('session_idle_timeout_seconds', self._GROUP_SESSION_IDLE_TIMEOUT, 300, 14400)
         lifetime = bounded('session_max_lifetime_seconds', self._GROUP_SESSION_MAX_LIFETIME, 3600, 86400)
-        return idle, max(idle, lifetime)
+        # The ceiling is the administrator's revalidation interval; an idle
+        # window longer than it is cut down, never the ceiling stretched.
+        return min(idle, lifetime), lifetime
 
     def _session_activity(self, username):
         """Last activity per session marker for one subject. Kept beside the
@@ -1546,17 +1551,12 @@ class SamlService(BaseService):
         markers = getattr(self, '_group_role_session_markers', {}).get(username, {})
         if not isinstance(marker, str) or marker not in markers:
             return
+        idle = self._reported_input_idle(request)
+        if idle is None:
+            if (request.headers.get('Sec-Fetch-Mode') or '').lower() != 'navigate':
+                return  # Not user activity: the idle clock keeps running.
+            idle = 0
         now = time.time()
-        idle = 0
-        raw = request.headers.get(self._INPUT_IDLE_HEADER)
-        if raw is not None:
-            try:
-                idle = int(raw)
-            except (TypeError, ValueError):
-                idle = 0
-            # Unparseable or negative reports count as activity now; a report
-            # cannot move the deadline later than the request itself.
-            idle = max(0, min(idle, 10 * 86400))
         activity = self._session_activity(username)
         for stale in [m for m in activity if m not in markers]:
             activity.pop(stale, None)
@@ -1564,10 +1564,28 @@ class SamlService(BaseService):
         seen = now - idle
         activity[marker] = max(previous, seen) if isinstance(previous, (int, float)) else seen
 
+    def _reported_input_idle(self, request):
+        """Seconds since the user's last input as the request reports it, or
+        None when it carries no usable report. A header repeated by two layers
+        arrives comma-joined; the largest value (the least activity) wins, and
+        a report can never place the activity later than the request itself."""
+        raw = request.headers.get(self._INPUT_IDLE_HEADER)
+        if not isinstance(raw, str):
+            return None
+        values = []
+        for part in raw.split(','):
+            part = part.strip()
+            if not part.isascii() or not part.isdigit():
+                return None
+            values.append(int(part))
+        return min(max(values), 10 * 86400) if values else None
+
     async def saml_session_status_handler(self, request):
         """GET /saml/session: the caller's own session deadlines, so the console
-        can warn before an idle sign-out and recognise one after it. Reading it
-        never extends the session."""
+        can warn before an idle sign-out and recognise one after it. A plain
+        read never extends the session; a read carrying an input report counts
+        that input, so a console whose tab sends no other request can still
+        report the user's activity."""
         headers = {'Cache-Control': 'no-store'}
         if self._group_role_policy() is None:
             return web.json_response({'managed': False}, headers=headers)
@@ -1576,6 +1594,7 @@ class SamlService(BaseService):
             return web.json_response({'managed': True, 'authenticated': False}, headers=headers)
         from aiohttp_session import get_session
         session = await get_session(request)
+        self._touch_group_session(request, record.get('subject'), session)
         idle, _ = self._session_limits()
         last = self._session_activity(record.get('subject')).get(session.get('saml_assertion_marker'))
         now = time.time()
@@ -1663,10 +1682,19 @@ class SamlService(BaseService):
         for marker, grant in list(markers.items()):
             last = activity.get(marker)
             # No recorded activity fails closed: every bound session records it.
-            if (not self._live_group_expiry(grant.get('expires_at'))
-                    or not isinstance(last, (int, float)) or now - last > idle_timeout):
-                markers.pop(marker, None)
-                activity.pop(marker, None)
+            if not self._live_group_expiry(grant.get('expires_at')):
+                reason = 'maximum lifetime reached'
+            elif not isinstance(last, (int, float)):
+                reason = 'no recorded activity'
+            elif now - last > idle_timeout:
+                reason = f'idle for {int(now - last)}s (limit {idle_timeout}s)'
+            else:
+                continue
+            markers.pop(marker, None)
+            activity.pop(marker, None)
+            self.log.info('SAML session ended for %s (session %s, role %s): %s', username,
+                          hashlib.sha256(marker.encode()).hexdigest()[:12],
+                          grant.get('selected_role'), reason)
         return (any(grant is identity for grant in markers.values())
                 and identity.get('name_id') == canonical['name_id']
                 and identity.get('groups') == canonical['groups']
