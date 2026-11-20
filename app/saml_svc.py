@@ -1582,11 +1582,18 @@ class SamlService(BaseService):
     def _reported_input_idle(self, request):
         """Seconds since the user's last input as the request reports it, or
         None when it carries no usable report. A header repeated by two layers
-        arrives comma-joined; the largest value (the least activity) wins, and
-        a report can never place the activity later than the request itself."""
-        raw = request.headers.get(self._INPUT_IDLE_HEADER)
-        if not isinstance(raw, str):
+        arrives comma-joined or as separate fields (aiohttp keeps those apart,
+        and .get() would read only the first); every value is read, the
+        largest (the least activity) wins, and a report can never place the
+        activity later than the request itself."""
+        headers = request.headers
+        getall = getattr(headers, 'getall', None)
+        fields = (getall(self._INPUT_IDLE_HEADER, []) if callable(getall)
+                  else [headers.get(self._INPUT_IDLE_HEADER)])
+        fields = [field for field in fields if field is not None]
+        if not fields or not all(isinstance(field, str) for field in fields):
             return None
+        raw = ','.join(fields)
         values = []
         for part in raw.split(','):
             part = part.strip()

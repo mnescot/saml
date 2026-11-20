@@ -191,6 +191,25 @@ def test_a_report_repeated_by_two_layers_counts_the_least_activity():
     assert last == clock.now - 1200
 
 
+def test_a_report_sent_as_separate_header_fields_counts_the_least_activity():
+    # Codex on saml#13: aiohttp keeps repeated fields apart; .get() saw only '0'.
+    from multidict import CIMultiDict
+    clock = Clock()
+    svc, info, cookie = signed_in(clock)
+    clock.now += 40 * 60
+    headers = CIMultiDict([(HEADER, '0'), (HEADER, '1200')])
+    assert request(svc, info, cookie, clock, headers=headers) == 200
+    last = svc._session_activity(info['email'])[cookie['saml_assertion_marker']]
+    assert last == clock.now - 1200
+    def reported(headers):
+        return svc._reported_input_idle(SimpleNamespace(headers=headers))
+    assert reported(CIMultiDict([(HEADER, '1200'), (HEADER, '0')])) == 1200
+    assert reported(CIMultiDict([(HEADER, '0, 30'), (HEADER, '5')])) == 30
+    # A malformed field anywhere makes the whole report unusable, as before.
+    assert reported(CIMultiDict([(HEADER, '0'), (HEADER, 'soon')])) is None
+    assert reported({HEADER: '7'}) == 7 and reported({}) is None
+
+
 def test_a_report_never_moves_activity_past_the_request_or_back_in_time():
     clock = Clock()
     svc, info, cookie = signed_in(clock)
