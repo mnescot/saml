@@ -572,7 +572,25 @@ _RED_BUTTON_HTML = (
 class SamlService(BaseService):
     # TTL (seconds) for a pending role-selection auth token
     _PENDING_AUTH_TTL = 300  # 5 minutes
-    _GROUP_SESSION_TTL = 3600  # Recheck direct-SAML entitlements at least hourly.
+    # A selected-role session ends after this long with no signed-in request
+    # that reflects user activity (sliding; see _touch_group_session).
+    _GROUP_SESSION_IDLE_TIMEOUT = 3600
+    # Hard ceiling from sign-in, however active the user is: entitlements
+    # (directory group membership) are re-read from a fresh assertion at least
+    # this often, so a group removal takes effect within it. One working day;
+    # policy may lower it (to an hour) but never raise it. The IdP's
+    # SessionNotOnOrAfter shortens it further.
+    _GROUP_SESSION_MAX_LIFETIME = 28800
+    _GROUP_SESSION_MAX_LIFETIME_LIMIT = 28800
+    # Sent by the console with each request: whole seconds since the user's
+    # last keyboard/pointer input in that tab. Only this report (a cross-site
+    # page cannot attach a custom header without a CORS preflight Caldera never
+    # grants), or a same-origin or user-typed browser navigation (Sec-Fetch-*
+    # headers, which page script cannot set), counts as activity; any other request leaves the idle clock running, so
+    # a poller the console does not instrument cannot keep an unattended
+    # session alive. The report is client-supplied: the idle timeout protects
+    # an unattended browser, not a stolen cookie, which the hard ceiling bounds.
+    _INPUT_IDLE_HEADER = 'X-Caldera-Input-Idle-Seconds'
     _MAX_GROUP_SESSIONS = 64
 
     # How long a consumed assertion is remembered when its own NotOnOrAfter
@@ -1500,10 +1518,118 @@ class SamlService(BaseService):
                         return web.HTTPFound('/saml/login')
                     return web.json_response({'error': 'saml_reauthentication_required',
                                               'login_url': '/saml/login'}, status=401)
+                self._touch_group_session(request, username, session)
                 scope = getattr(self, '_session_permission_scope', None)
                 if scope is not None:
                     scope.set((username, record))
         return await handler(request)
+
+    def _session_limits(self):
+        """(idle timeout, max lifetime) in seconds. The policy may tune both
+        within fixed bounds; a malformed value keeps the default rather than
+        falling to either extreme."""
+        policy = self._group_role_policy() or {}
+
+        def bounded(key, default, low, high):
+            value = policy.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, int):
+                return default
+            return max(low, min(value, high))
+        idle = bounded('session_idle_timeout_seconds', self._GROUP_SESSION_IDLE_TIMEOUT, 300, 14400)
+        lifetime = bounded('session_max_lifetime_seconds', self._GROUP_SESSION_MAX_LIFETIME, 3600,
+                           self._GROUP_SESSION_MAX_LIFETIME_LIMIT)
+        # The ceiling is the administrator's revalidation interval; an idle
+        # window longer than it is cut down, never the ceiling stretched.
+        return min(idle, lifetime), lifetime
+
+    def _session_activity(self, username):
+        """Last activity per session marker for one subject. Kept beside the
+        immutable grants: a grant's identity is what plugins hold and compare,
+        so the sliding deadline cannot live inside it."""
+        store = getattr(self, '_group_session_activity', None)
+        if store is None:
+            store = self._group_session_activity = {}
+        return store.setdefault(username, {})
+
+    def _touch_group_session(self, request, username, session):
+        marker = session.get('saml_assertion_marker')
+        markers = getattr(self, '_group_role_session_markers', {}).get(username, {})
+        if not isinstance(marker, str) or marker not in markers:
+            return
+        idle = self._reported_input_idle(request)
+        if idle is None:
+            if not self._user_navigation(request):
+                return  # Not user activity: the idle clock keeps running.
+            idle = 0
+        now = time.time()
+        activity = self._session_activity(username)
+        for stale in [m for m in activity if m not in markers]:
+            activity.pop(stale, None)
+        previous = activity.get(marker)
+        seen = now - idle
+        activity[marker] = max(previous, seen) if isinstance(previous, (int, float)) else seen
+
+    @staticmethod
+    def _user_navigation(request):
+        """A page load the user made here: moving between Caldera pages, or a
+        typed address/bookmark (Sec-Fetch-Site: none). A navigation another
+        site started (a link, window.open, location=...) carries the cookie
+        too, but it is not this user working in Caldera."""
+        headers = request.headers
+        return ((headers.get('Sec-Fetch-Mode') or '').lower() == 'navigate'
+                and (headers.get('Sec-Fetch-Site') or '').lower() in ('same-origin', 'none'))
+
+    def _reported_input_idle(self, request):
+        """Seconds since the user's last input as the request reports it, or
+        None when it carries no usable report. A header repeated by two layers
+        arrives comma-joined or as separate fields (aiohttp keeps those apart,
+        and .get() would read only the first); every value is read, the
+        largest (the least activity) wins, and a report can never place the
+        activity later than the request itself."""
+        headers = request.headers
+        getall = getattr(headers, 'getall', None)
+        fields = (getall(self._INPUT_IDLE_HEADER, []) if callable(getall)
+                  else [headers.get(self._INPUT_IDLE_HEADER)])
+        fields = [field for field in fields if field is not None]
+        if not fields or not all(isinstance(field, str) for field in fields):
+            return None
+        raw = ','.join(fields)
+        values = []
+        for part in raw.split(','):
+            part = part.strip()
+            # Ten digits already exceed any idle time; longer is not a report
+            # (and would cost int() a quadratic parse).
+            if not part.isascii() or not part.isdigit() or len(part) > 10:
+                return None
+            values.append(int(part))
+        return min(max(values), 10 * 86400) if values else None
+
+    async def saml_session_status_handler(self, request):
+        """GET /saml/session: the caller's own session deadlines, so the console
+        can warn before an idle sign-out and recognise one after it. A plain
+        read never extends the session; a read carrying an input report counts
+        that input, so a console whose tab sends no other request can still
+        report the user's activity."""
+        headers = {'Cache-Control': 'no-store'}
+        if self._group_role_policy() is None:
+            return web.json_response({'managed': False}, headers=headers)
+        record = await self._session_group_identity(request)
+        if record is None:
+            return web.json_response({'managed': True, 'authenticated': False}, headers=headers)
+        from aiohttp_session import get_session
+        session = await get_session(request)
+        if self._reported_input_idle(request) is not None:
+            # Only an explicit input report: opening this URL is not work.
+            self._touch_group_session(request, record.get('subject'), session)
+        idle, _ = self._session_limits()
+        last = self._session_activity(record.get('subject')).get(session.get('saml_assertion_marker'))
+        now = time.time()
+        return web.json_response({
+            'managed': True, 'authenticated': True, 'now': int(now),
+            'idle_timeout_seconds': idle,
+            'idle_expires_at': int((last if isinstance(last, (int, float)) else now) + idle),
+            'expires_at': int(record.get('expires_at') or now),
+        }, headers=headers)
 
     def _remember_group_identity(self, info):
         identities = getattr(self, '_group_role_identities', {})
@@ -1518,6 +1644,7 @@ class SamlService(BaseService):
         markers = getattr(self, '_group_role_session_markers', {})
         markers[info['email']] = {}
         self._group_role_session_markers = markers
+        self._session_activity(info['email']).clear()
 
     def _current_group_account(self, identity):
         if not isinstance(identity, Mapping) or self._group_role_policy() is None:
@@ -1532,23 +1659,33 @@ class SamlService(BaseService):
                     and getattr(self, '_group_role_denials', {}).get(username) is not binding[1])
 
     def _group_grant_expiry(self, response):
-        """Use the validated assertion/session deadline, capped at one hour."""
+        """The session's hard deadline: the configured maximum lifetime, cut
+        short by the IdP's SessionNotOnOrAfter.
+
+        Conditions/NotOnOrAfter bounds when the ASSERTION may be consumed (Entra
+        issues about an hour), not how long the resulting session lasts, so it
+        only refuses a login whose assertion has already lapsed. Using it as the
+        session length is what signed operators out an hour after sign-in
+        however active they were."""
         from datetime import datetime
-        expires = time.time() + self._GROUP_SESSION_TTL
+        now = time.time()
+        expires = now + self._session_limits()[1]
         assertion = getattr(response, 'assertion', None)
-        values = [getattr(getattr(assertion, 'conditions', None), 'not_on_or_after', None)]
-        values.extend(getattr(statement, 'session_not_on_or_after', None)
+        values = [(getattr(getattr(assertion, 'conditions', None), 'not_on_or_after', None), False)]
+        values.extend((getattr(statement, 'session_not_on_or_after', None), True)
                       for statement in (getattr(assertion, 'authn_statement', None) or []))
-        for value in values:
+        for value, bounds_session in values:
             if value is None:
                 continue
             try:
                 parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
                 if parsed.tzinfo is None:
                     return None
-                expires = min(expires, parsed.timestamp())
+                stamp = parsed.timestamp()
             except (AttributeError, ValueError, TypeError, OverflowError):
                 return None
+            if bounds_session or stamp <= now:
+                expires = min(expires, stamp)
         return expires
 
     @staticmethod
@@ -1565,9 +1702,25 @@ class SamlService(BaseService):
         if not self._current_group_account(canonical):
             return False
         markers = getattr(self, '_group_role_session_markers', {}).get(username, {})
+        activity = self._session_activity(username)
+        idle_timeout = self._session_limits()[0]
+        now = time.time()
         for marker, grant in list(markers.items()):
+            last = activity.get(marker)
+            # No recorded activity fails closed: every bound session records it.
             if not self._live_group_expiry(grant.get('expires_at')):
-                markers.pop(marker, None)
+                reason = 'maximum lifetime reached'
+            elif not isinstance(last, (int, float)):
+                reason = 'no recorded activity'
+            elif now - last > idle_timeout:
+                reason = f'idle for {int(now - last)}s (limit {idle_timeout}s)'
+            else:
+                continue
+            markers.pop(marker, None)
+            activity.pop(marker, None)
+            self.log.info('SAML session ended for %s (session %s, role %s): %s', username,
+                          hashlib.sha256(marker.encode()).hexdigest()[:12],
+                          grant.get('selected_role'), reason)
         return (any(grant is identity for grant in markers.values())
                 and identity.get('name_id') == canonical['name_id']
                 and identity.get('groups') == canonical['groups']
@@ -1614,6 +1767,7 @@ class SamlService(BaseService):
             markers.pop(next(iter(markers)))
         markers[marker] = MappingProxyType({**identity,
             'selected_role': user_info['selected_role'], 'expires_at': user_info['authn_expires_at']})
+        self._session_activity(username)[marker] = time.time()
         session['saml_assertion_marker'] = marker
         session['saml_assertion_subject'] = username
 
@@ -1624,10 +1778,11 @@ class SamlService(BaseService):
         if (not isinstance(info.get('groups'), (list, tuple))
                 or not all(isinstance(group, str) for group in info['groups'])):
             return False
-        info.setdefault('authn_expires_at', time.time() + self._GROUP_SESSION_TTL)
+        lifetime = self._session_limits()[1]
+        info.setdefault('authn_expires_at', time.time() + lifetime)
         if not self._live_group_expiry(info['authn_expires_at']):
             return False
-        info['authn_expires_at'] = min(info['authn_expires_at'], time.time() + self._GROUP_SESSION_TTL)
+        info['authn_expires_at'] = min(info['authn_expires_at'], time.time() + lifetime)
         roles = self._group_roles(info)
         if role not in roles:
             return False

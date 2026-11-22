@@ -411,9 +411,12 @@ def test_protected_permission_sets_accept_every_native_tuple_order(role):
         assert auth.user_map[old.username] is old
 
 
-@pytest.mark.parametrize('condition,session,expected', [(100, 50, 50), (50, 100, 50),
-    (7200, None, 3600), (None, None, 3600), (-1, None, -1)])
-def test_grant_deadline_uses_earliest_assertion_or_session_limit(condition, session, expected):
+@pytest.mark.parametrize('condition,session,expected', [(100, 50, 50), (50, 100, 100),
+    (7200, None, 28800), (None, None, 28800), (-1, None, -1), (100, 90000, 28800)])
+def test_grant_deadline_is_the_max_lifetime_cut_by_the_idp_session_not_the_assertion(
+        condition, session, expected):
+    """SessionNotOnOrAfter bounds the session; Conditions/NotOnOrAfter only
+    refuses an assertion that has already lapsed."""
     from datetime import datetime, timezone
     from unittest.mock import patch
     svc, _ = service()
